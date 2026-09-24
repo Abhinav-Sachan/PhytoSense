@@ -1,0 +1,8 @@
+# Security: Never commit API keys
+backend/.env
+
+# Python cache and environments
+__pycache__/
+*.pyc
+venv/
+env/

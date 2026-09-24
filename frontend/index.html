@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>PhytoSense — Bio-Signal Monitor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <nav class="mainnav">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span class="brand-name">PhytoSense</span>
+    </div>
+    <div class="nav-links">
+      <button class="nav-link active" data-view="home">Home</button>
+      <button class="nav-link" data-view="dashboard">Dashboard</button>
+      <button class="nav-link" data-view="ai">AI Assistant</button>
+    </div>
+    <div class="status" id="connectionStatus" data-state="offline">
+      <span class="status-dot"></span>
+      <span class="status-text">Not connected</span>
+    </div>
+  </nav>
+
+  <!-- ============================== HOME ============================== -->
+  <section class="view" id="view-home" data-view="home">
+
+    <div class="hero">
+      <p class="hero-eyebrow">Plant bio-electric monitoring</p>
+      <h1>Plants speak in millivolts.<br>PhytoSense listens.</h1>
+      <p class="hero-sub">
+        A surface bio-potential sensor, a real-time DSP pipeline, and a
+        trained classifier turn a plant's raw electrical signal into a
+        readable state — then an AI assistant explains what it means and
+        answers questions about it, in plain language.
+      </p>
+      <div class="hero-actions">
+        <button class="btn-primary" data-nav="dashboard">Open dashboard</button>
+        <button class="btn-secondary" data-nav="ai">Ask the AI assistant</button>
+      </div>
+    </div>
+
+    <div class="hero-readout" aria-hidden="true">
+      <svg viewBox="0 0 600 140" class="hero-wave" preserveAspectRatio="none">
+        <polyline points="0,70 40,70 55,20 70,120 85,40 100,90 130,70 180,70 195,30 210,110 225,55 240,80 270,70 600,70"
+          fill="none" stroke="#7fb88f" stroke-width="1.6" />
+      </svg>
+    </div>
+
+    <div class="section">
+      <h2 class="section-title">How it works</h2>
+      <ol class="steps">
+        <li class="step">
+          <span class="step-index">1</span>
+          <h3>Sense</h3>
+          <p>An electrode pair captures the plant's surface bio-potential — a
+          slow-moving electrical signal that shifts with hydration, light,
+          and touch.</p>
+        </li>
+        <li class="step">
+          <span class="step-index">2</span>
+          <h3>Filter</h3>
+          <p>A 50 Hz notch filter strips mains interference; a moving average
+          smooths sensor noise, leaving the genuine physiological trend.</p>
+        </li>
+        <li class="step">
+          <span class="step-index">3</span>
+          <h3>Classify</h3>
+          <p>Six extracted features feed a Random Forest model that scores
+          the signal against Healthy, Mild Stress, and Water Deficit.</p>
+        </li>
+        <li class="step">
+          <span class="step-index">4</span>
+          <h3>Explain</h3>
+          <p>An LLM turns the classification and readouts into a plain
+          status update, and stays available to answer follow-up questions.</p>
+        </li>
+      </ol>
+    </div>
+
+    <div class="section capability-row">
+      <div class="capability">
+        <h3>Live waveform + spectrum</h3>
+        <p>Raw and filtered signal side by side, with a real-time frequency
+        breakdown of what's driving the current reading.</p>
+      </div>
+      <div class="capability">
+        <h3>Grounded AI diagnosis</h3>
+        <p>Every AI response is generated from the instrument's actual
+        current readout — never a guess disconnected from live data.</p>
+      </div>
+      <div class="capability">
+        <h3>Built for real hardware</h3>
+        <p>The synthetic signal generator swaps for a live serial feed
+        without touching the filtering, ML, or UI layers.</p>
+      </div>
+    </div>
+
+  </section>
+
+  <!-- ============================ DASHBOARD ============================ -->
+  <section class="view" id="view-dashboard" data-view="dashboard" hidden>
+    <div class="dashboard">
+
+      <section class="panel scope-panel">
+        <div class="panel-header">
+          <h2>Live waveform</h2>
+          <div class="trace-toggle">
+            <button class="toggle-btn active" data-trace="filtered">Filtered</button>
+            <button class="toggle-btn" data-trace="raw">Raw</button>
+            <button class="toggle-btn" data-trace="both">Both</button>
+          </div>
+        </div>
+        <div class="chart-wrap">
+          <canvas id="waveformChart"></canvas>
+        </div>
+      </section>
+
+      <section class="panel readout-panel">
+        <div class="panel-header"><h2>Plant state</h2></div>
+        <div class="classification" id="classification">
+          <div class="classification-label" id="classLabel">—</div>
+          <div class="classification-confidence" id="classConfidence">Awaiting data</div>
+        </div>
+        <div class="prob-bars" id="probBars"></div>
+        <div class="readout-grid">
+          <div class="readout">
+            <span class="readout-label">RMS amplitude</span>
+            <span class="readout-value" id="valRms">—</span>
+          </div>
+          <div class="readout">
+            <span class="readout-label">Peak amplitude</span>
+            <span class="readout-value" id="valPeak">—</span>
+          </div>
+          <div class="readout">
+            <span class="readout-label">Dominant frequency</span>
+            <span class="readout-value" id="valFreq">—</span>
+          </div>
+          <div class="readout">
+            <span class="readout-label">Zero-crossing rate</span>
+            <span class="readout-value" id="valZcr">—</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel spectrum-panel">
+        <div class="panel-header"><h2>Frequency spectrum</h2></div>
+        <div class="chart-wrap"><canvas id="spectrumChart"></canvas></div>
+      </section>
+
+      <section class="panel log-panel">
+        <div class="panel-header"><h2>Session log</h2></div>
+        <div class="log-table-wrap">
+          <table class="log-table">
+            <thead><tr><th>Time</th><th>State</th><th>Confidence</th></tr></thead>
+            <tbody id="logBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+    </div>
+  </section>
+
+  <!-- ============================ AI ASSISTANT ============================ -->
+  <section class="view" id="view-ai" data-view="ai" hidden>
+    <div class="ai-grid">
+
+      <section class="panel status-panel">
+        <div class="panel-header">
+          <h2>Current status</h2>
+          <button class="btn-primary small" id="runDiagnosisBtn">Analyze now</button>
+        </div>
+        <div class="status-body" id="statusBody">
+          <p class="status-placeholder">Run an analysis to get a plain-language
+          read on the plant's current condition, generated from the live
+          sensor data.</p>
+        </div>
+        <div class="status-meta" id="statusMeta"></div>
+      </section>
+
+      <section class="panel chat-panel">
+        <div class="panel-header"><h2>Ask about your plant</h2></div>
+        <div class="chat-messages" id="chatMessages">
+          <div class="chat-msg assistant">
+            <div class="chat-bubble">Hi — I can see the current sensor
+            reading. Ask me anything about what's happening with the plant,
+            or what to do about it.</div>
+          </div>
+        </div>
+        <form class="chat-input-row" id="chatForm">
+          <textarea id="chatInput" placeholder="e.g. Why is the water deficit score rising?" rows="1"></textarea>
+          <button type="submit" class="btn-primary small">Send</button>
+        </form>
+      </section>
+
+    </div>
+  </section>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
