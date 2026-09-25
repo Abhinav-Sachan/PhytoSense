@@ -1,283 +1,1937 @@
 /**
- * app.js
- * ------
- * No login, no API key, no setup step: the frontend talks straight to
- * the local Flask backend at BACKEND_URL. Just open this page with
- * backend/main.py running and it works.
+ * PhytoSense — Frontend Application
+ * ---------------------------------
+ * Connects the dashboard to the local Flask backend.
  *
- * The LLM key itself never appears here — /api/ai/* routes are
- * handled entirely by the backend, which holds the real Anthropic key
- * in its own .env file (see backend/llm_service.py).
+ * Chart.js is loaded locally from:
+ *     chart.umd.min.js
+ *
+ * Data flow:
+ *     Flask API → Waveform → Chart.js
+ *               → Metrics → Dashboard
+ *               → ML Classification
+ *               → AI Diagnosis / Chat
  */
 
 const BACKEND_URL = "http://127.0.0.1:5000";
 const POLL_INTERVAL_MS = 1000;
+const SAMPLE_RATE = 100;
+
+
+/* ============================================================
+   APPLICATION STATE
+   ============================================================ */
 
 const state = {
-  connected: false,
-  pollHandle: null,
-  traceMode: "filtered",
-  currentView: "home",
-  chatHistory: [],
+    connected: false,
+    pollHandle: null,
+    traceMode: "filtered",
+    currentView: "home",
+    chatHistory: []
 };
+
+
+/* ============================================================
+   DOM ELEMENTS
+   ============================================================ */
 
 const el = {
-  navLinks: document.querySelectorAll(".nav-link"),
-  navButtons: document.querySelectorAll("[data-nav]"),
-  views: document.querySelectorAll(".view"),
-  connectionStatus: document.getElementById("connectionStatus"),
+    navLinks: document.querySelectorAll(".nav-link"),
+    navButtons: document.querySelectorAll("[data-nav]"),
+    views: document.querySelectorAll(".view"),
 
-  classLabel: document.getElementById("classLabel"),
-  classConfidence: document.getElementById("classConfidence"),
-  probBars: document.getElementById("probBars"),
-  valRms: document.getElementById("valRms"),
-  valPeak: document.getElementById("valPeak"),
-  valFreq: document.getElementById("valFreq"),
-  valZcr: document.getElementById("valZcr"),
-  logBody: document.getElementById("logBody"),
+    connectionStatus:
+        document.getElementById("connectionStatus"),
 
-  runDiagnosisBtn: document.getElementById("runDiagnosisBtn"),
-  statusBody: document.getElementById("statusBody"),
-  statusMeta: document.getElementById("statusMeta"),
+    classLabel:
+        document.getElementById("classLabel"),
 
-  chatMessages: document.getElementById("chatMessages"),
-  chatForm: document.getElementById("chatForm"),
-  chatInput: document.getElementById("chatInput"),
+    classConfidence:
+        document.getElementById("classConfidence"),
+
+    probBars:
+        document.getElementById("probBars"),
+
+    valRms:
+        document.getElementById("valRms"),
+
+    valPeak:
+        document.getElementById("valPeak"),
+
+    valFreq:
+        document.getElementById("valFreq"),
+
+    valZcr:
+        document.getElementById("valZcr"),
+
+    logBody:
+        document.getElementById("logBody"),
+
+    runDiagnosisBtn:
+        document.getElementById("runDiagnosisBtn"),
+
+    statusBody:
+        document.getElementById("statusBody"),
+
+    statusMeta:
+        document.getElementById("statusMeta"),
+
+    chatMessages:
+        document.getElementById("chatMessages"),
+
+    chatForm:
+        document.getElementById("chatForm"),
+
+    chatInput:
+        document.getElementById("chatInput")
 };
 
-// Navigation — plain view switching, no gating
+
+/* ============================================================
+   NAVIGATION
+   ============================================================ */
+
 function navigateTo(view) {
-  state.currentView = view;
-  el.views.forEach((v) => { v.hidden = v.dataset.view !== view; });
-  el.navLinks.forEach((btn) => btn.classList.toggle("active", btn.dataset.view === view));
+
+    state.currentView = view;
+
+    el.views.forEach((element) => {
+        element.hidden =
+            element.dataset.view !== view;
+    });
+
+    el.navLinks.forEach((button) => {
+        button.classList.toggle(
+            "active",
+            button.dataset.view === view
+        );
+    });
 }
-el.navLinks.forEach((btn) => btn.addEventListener("click", () => navigateTo(btn.dataset.view)));
-el.navButtons.forEach((btn) => btn.addEventListener("click", () => navigateTo(btn.dataset.nav)));
+
+
+el.navLinks.forEach((button) => {
+
+    button.addEventListener("click", () => {
+        navigateTo(button.dataset.view);
+    });
+
+});
+
+
+el.navButtons.forEach((button) => {
+
+    button.addEventListener("click", () => {
+        navigateTo(button.dataset.nav);
+    });
+
+});
+
+
+/* ============================================================
+   CONNECTION STATUS
+   ============================================================ */
 
 function setConnectionState(online) {
-  state.connected = online;
-  el.connectionStatus.dataset.state = online ? "online" : "offline";
-  el.connectionStatus.querySelector(".status-text").textContent = online ? "Connected" : "Backend offline";
+
+    state.connected = online;
+
+    if (!el.connectionStatus) {
+        return;
+    }
+
+    el.connectionStatus.dataset.state =
+        online ? "online" : "offline";
+
+    const statusText =
+        el.connectionStatus.querySelector(".status-text");
+
+    if (statusText) {
+
+        statusText.textContent =
+            online
+                ? "Connected"
+                : "Backend offline";
+    }
 }
 
-// Networking helpers
+
+/* ============================================================
+   API
+   ============================================================ */
+
 async function apiGet(path) {
-  const res = await fetch(`${BACKEND_URL}${path}`);
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Request failed (${res.status})`);
-  }
-  return res.json();
+
+    const response = await fetch(
+        `${BACKEND_URL}${path}`
+    );
+
+    if (!response.ok) {
+
+        const body =
+            await response
+                .json()
+                .catch(() => ({}));
+
+        throw new Error(
+            body.error ||
+            `Request failed (${response.status})`
+        );
+    }
+
+    return response.json();
 }
+
 
 async function apiPost(path, payload) {
-  const res = await fetch(`${BACKEND_URL}${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Request failed (${res.status})`);
-  }
-  return res.json();
+
+    const response = await fetch(
+        `${BACKEND_URL}${path}`,
+        {
+            method: "POST",
+
+            headers: {
+                "Content-Type": "application/json"
+            },
+
+            body: JSON.stringify(payload)
+        }
+    );
+
+    if (!response.ok) {
+
+        const body =
+            await response
+                .json()
+                .catch(() => ({}));
+
+        throw new Error(
+            body.error ||
+            `Request failed (${response.status})`
+        );
+    }
+
+    return response.json();
 }
 
-// Charts
+
+/* ============================================================
+   CHART CONFIGURATION
+   ============================================================ */
+
 const CHART_GREEN = "#7fb88f";
 const CHART_AMBER = "#dba55b";
 const GRID_COLOR = "rgba(255,255,255,0.05)";
 const TICK_COLOR = "#5c675f";
 
+
+/* ============================================================
+   CHART.JS CHECK
+   ============================================================ */
+
+if (typeof Chart === "undefined") {
+
+    throw new Error(
+        "Chart.js failed to load. Check chart.umd.min.js in the frontend folder."
+    );
+}
+
+
 Chart.defaults.font.family = "IBM Plex Mono";
 Chart.defaults.font.size = 11;
 
-const waveformChart = new Chart(document.getElementById("waveformChart"), {
-  type: "line",
-  data: {
-    labels: [],
-    datasets: [
-      { label: "Filtered", data: [], borderColor: CHART_GREEN, borderWidth: 1.5, pointRadius: 0, tension: 0.15 },
-      { label: "Raw", data: [], borderColor: CHART_AMBER, borderWidth: 1, pointRadius: 0, tension: 0.1, hidden: true },
-    ],
-  },
-  options: {
-    animation: false,
-    responsive: true,
-    maintainAspectRatio: false,
-    plugins: { legend: { display: false } },
-    scales: {
-      x: { display: false },
-      y: { grid: { color: GRID_COLOR }, ticks: { color: TICK_COLOR } },
-    },
-  },
-});
 
-const spectrumChart = new Chart(document.getElementById("spectrumChart"), {
-  type: "bar",
-  data: { labels: [], datasets: [{ label: "Magnitude", data: [], backgroundColor: CHART_GREEN }] },
-  options: {
-    animation: false,
-    responsive: true,
-    maintainAspectRatio: false,
-    plugins: { legend: { display: false } },
-    scales: {
-      x: { grid: { display: false }, ticks: { color: TICK_COLOR, maxTicksLimit: 8 }, title: { display: true, text: "Hz", color: TICK_COLOR } },
-      y: { grid: { color: GRID_COLOR }, ticks: { color: TICK_COLOR } },
-    },
-  },
-});
+/* ============================================================
+   WAVEFORM CHART
+   ============================================================ */
 
-document.querySelectorAll(".toggle-btn").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    document.querySelectorAll(".toggle-btn").forEach((b) => b.classList.remove("active"));
-    btn.classList.add("active");
-    state.traceMode = btn.dataset.trace;
-    const [filteredSet, rawSet] = waveformChart.data.datasets;
-    filteredSet.hidden = state.traceMode === "raw";
-    rawSet.hidden = state.traceMode === "filtered";
-    waveformChart.update();
-  });
-});
+const waveformCanvas =
+    document.getElementById("waveformChart");
 
-// Polling: waveform + metrics
-let lastLoggedLabel = null;
+
+const waveformChart =
+    new Chart(
+        waveformCanvas,
+        {
+            type: "line",
+
+            data: {
+
+                labels: [],
+
+                datasets: [
+
+                    {
+                        label: "Filtered",
+
+                        data: [],
+
+                        borderColor:
+                            CHART_GREEN,
+
+                        borderWidth: 1.5,
+
+                        pointRadius: 0,
+
+                        tension: 0.15
+                    },
+
+                    {
+                        label: "Raw",
+
+                        data: [],
+
+                        borderColor:
+                            CHART_AMBER,
+
+                        borderWidth: 1,
+
+                        pointRadius: 0,
+
+                        tension: 0.1,
+
+                        hidden: true
+                    }
+                ]
+            },
+
+            options: {
+
+                animation: false,
+
+                responsive: true,
+
+                maintainAspectRatio: false,
+
+                interaction: {
+                    intersect: false,
+                    mode: "index"
+                },
+
+                plugins: {
+
+                    legend: {
+                        display: false
+                    },
+
+                    tooltip: {
+                        enabled: false
+                    }
+                },
+
+                scales: {
+
+                    x: {
+                        display: false
+                    },
+
+                    y: {
+
+                        grid: {
+                            color: GRID_COLOR
+                        },
+
+                        ticks: {
+                            color: TICK_COLOR
+                        }
+                    }
+                }
+            }
+        }
+    );
+
+
+/* ============================================================
+   SPECTRUM CHART
+   ============================================================ */
+
+const spectrumCanvas =
+    document.getElementById("spectrumChart");
+
+
+const spectrumChart =
+    new Chart(
+        spectrumCanvas,
+        {
+            type: "bar",
+
+            data: {
+
+                labels: [],
+
+                datasets: [
+
+                    {
+                        label: "Magnitude",
+
+                        data: [],
+
+                        backgroundColor:
+                            CHART_GREEN
+                    }
+                ]
+            },
+
+            options: {
+
+                animation: false,
+
+                responsive: true,
+
+                maintainAspectRatio: false,
+
+                plugins: {
+
+                    legend: {
+                        display: false
+                    }
+                },
+
+                scales: {
+
+                    x: {
+
+                        grid: {
+                            display: false
+                        },
+
+                        ticks: {
+
+                            color:
+                                TICK_COLOR,
+
+                            maxTicksLimit: 8
+                        },
+
+                        title: {
+
+                            display: true,
+
+                            text:
+                                "Frequency (Hz)",
+
+                            color:
+                                TICK_COLOR
+                        }
+                    },
+
+                    y: {
+
+                        grid: {
+                            color:
+                                GRID_COLOR
+                        },
+
+                        ticks: {
+                            color:
+                                TICK_COLOR
+                        }
+                    }
+                }
+            }
+        }
+    );
+
+
+/* ============================================================
+   WAVEFORM TOGGLE
+   ============================================================ */
+
+document
+    .querySelectorAll(".toggle-btn")
+    .forEach((button) => {
+
+        button.addEventListener(
+            "click",
+            () => {
+
+                document
+                    .querySelectorAll(".toggle-btn")
+                    .forEach((item) => {
+                        item.classList.remove(
+                            "active"
+                        );
+                    });
+
+                button.classList.add("active");
+
+                state.traceMode =
+                    button.dataset.trace;
+
+                const filteredDataset =
+                    waveformChart
+                        .data
+                        .datasets[0];
+
+                const rawDataset =
+                    waveformChart
+                        .data
+                        .datasets[1];
+
+                filteredDataset.hidden =
+                    state.traceMode === "raw";
+
+                rawDataset.hidden =
+                    state.traceMode === "filtered";
+
+                waveformChart.update();
+            }
+        );
+
+    });
+
+
+/* ============================================================
+   REAL FFT CALCULATION
+   ============================================================ */
+
+function calculateSpectrum(signal) {
+
+    if (!signal || signal.length < 4) {
+
+        return {
+            frequencies: [],
+            magnitudes: []
+        };
+    }
+
+    const originalLength =
+        signal.length;
+
+    let n = 1;
+
+    while (n < originalLength) {
+        n *= 2;
+    }
+
+
+    const real =
+        new Array(n).fill(0);
+
+    const imag =
+        new Array(n).fill(0);
+
+
+    for (
+        let i = 0;
+        i < originalLength;
+        i++
+    ) {
+
+        real[i] =
+            Number(signal[i]) || 0;
+    }
+
+
+    /* Bit-reversal permutation */
+
+    let j = 0;
+
+    for (
+        let i = 1;
+        i < n;
+        i++
+    ) {
+
+        let bit = n >> 1;
+
+        while (j & bit) {
+
+            j ^= bit;
+            bit >>= 1;
+        }
+
+        j ^= bit;
+
+        if (i < j) {
+
+            [
+                real[i],
+                real[j]
+            ] =
+            [
+                real[j],
+                real[i]
+            ];
+        }
+    }
+
+
+    /* Cooley-Tukey FFT */
+
+    for (
+        let length = 2;
+        length <= n;
+        length *= 2
+    ) {
+
+        const angle =
+            (-2 * Math.PI) / length;
+
+        const wReal =
+            Math.cos(angle);
+
+        const wImag =
+            Math.sin(angle);
+
+
+        for (
+            let start = 0;
+            start < n;
+            start += length
+        ) {
+
+            let currentReal = 1;
+            let currentImag = 0;
+
+            const half =
+                length / 2;
+
+
+            for (
+                let i = 0;
+                i < half;
+                i++
+            ) {
+
+                const evenIndex =
+                    start + i;
+
+                const oddIndex =
+                    start + i + half;
+
+
+                const oddReal =
+                    real[oddIndex];
+
+                const oddImag =
+                    imag[oddIndex];
+
+
+                const multipliedReal =
+                    currentReal * oddReal -
+                    currentImag * oddImag;
+
+                const multipliedImag =
+                    currentReal * oddImag +
+                    currentImag * oddReal;
+
+
+                real[oddIndex] =
+                    real[evenIndex] -
+                    multipliedReal;
+
+                imag[oddIndex] =
+                    imag[evenIndex] -
+                    multipliedImag;
+
+
+                real[evenIndex] +=
+                    multipliedReal;
+
+                imag[evenIndex] +=
+                    multipliedImag;
+
+
+                const nextReal =
+                    currentReal * wReal -
+                    currentImag * wImag;
+
+                const nextImag =
+                    currentReal * wImag +
+                    currentImag * wReal;
+
+
+                currentReal =
+                    nextReal;
+
+                currentImag =
+                    nextImag;
+            }
+        }
+    }
+
+
+    /* One-sided spectrum */
+
+    const frequencies = [];
+    const magnitudes = [];
+
+
+    for (
+        let i = 0;
+        i <= n / 2;
+        i++
+    ) {
+
+        const frequency =
+            (i * SAMPLE_RATE) / n;
+
+        const magnitude =
+            Math.sqrt(
+                real[i] * real[i] +
+                imag[i] * imag[i]
+            ) / n;
+
+
+        frequencies.push(
+            frequency.toFixed(1)
+        );
+
+        magnitudes.push(
+            magnitude
+        );
+    }
+
+
+    return {
+        frequencies,
+        magnitudes
+    };
+}
+
+
+/* ============================================================
+   UPDATE SPECTRUM
+   ============================================================ */
+
+function renderSpectrum(signal) {
+
+    const spectrum =
+        calculateSpectrum(signal);
+
+    spectrumChart.data.labels =
+        spectrum.frequencies;
+
+    spectrumChart
+        .data
+        .datasets[0]
+        .data =
+        spectrum.magnitudes;
+
+    spectrumChart.update("none");
+}
+
+
+/* ============================================================
+   WAVEFORM POLLING
+   ============================================================ */
 
 async function pollWaveform() {
-  const data = await apiGet("/api/waveform");
-  waveformChart.data.labels = data.filtered.map((_, i) => i);
-  waveformChart.data.datasets[0].data = data.filtered;
-  waveformChart.data.datasets[1].data = data.raw;
-  waveformChart.update();
+
+    const data =
+        await apiGet("/api/waveform");
+
+    if (!data) {
+        return;
+    }
+
+
+    const filtered =
+        data.filtered || [];
+
+    const raw =
+        data.raw || [];
+
+
+    waveformChart.data.labels =
+        filtered.map(
+            (_, index) => index
+        );
+
+
+    waveformChart
+        .data
+        .datasets[0]
+        .data =
+        filtered;
+
+
+    waveformChart
+        .data
+        .datasets[1]
+        .data =
+        raw;
+
+
+    waveformChart.update("none");
+
+
+    if (filtered.length > 0) {
+        renderSpectrum(filtered);
+    }
 }
+
+
+/* ============================================================
+   METRICS POLLING
+   ============================================================ */
+
+let lastLoggedLabel = null;
+
 
 async function pollMetrics() {
-  const data = await apiGet("/api/metrics");
-  if (!data.ready) return;
 
-  el.classLabel.textContent = data.label;
-  el.classConfidence.textContent = `${(data.confidence * 100).toFixed(1)}% confidence`;
-  renderProbBars(data.probabilities);
+    const data =
+        await apiGet("/api/metrics");
 
-  el.valRms.textContent = data.features.rms.toFixed(3);
-  el.valPeak.textContent = data.features.max_amplitude.toFixed(3);
-  el.valFreq.textContent = `${data.features.dominant_frequency.toFixed(1)} Hz`;
-  el.valZcr.textContent = data.features.zero_crossing_rate.toFixed(3);
+    if (!data || !data.ready) {
+        return;
+    }
 
-  renderSpectrumFromFeatures(data);
 
-  if (data.label !== lastLoggedLabel) {
-    appendLogRow(data.label, data.confidence);
-    lastLoggedLabel = data.label;
-  }
+    /* Classification */
+
+    el.classLabel.textContent =
+        data.label || "Unknown";
+
+
+    el.classConfidence.textContent =
+        `${(
+            (data.confidence || 0) * 100
+        ).toFixed(1)}% confidence`;
+
+
+    /* Probability bars */
+
+    renderProbBars(
+        data.probabilities || {}
+    );
+
+
+    /* ML features */
+
+    const features =
+        data.features || {};
+
+
+    el.valRms.textContent =
+        Number(
+            features.rms || 0
+        ).toFixed(3);
+
+
+    el.valPeak.textContent =
+        Number(
+            features.max_amplitude || 0
+        ).toFixed(3);
+
+
+    el.valFreq.textContent =
+        `${Number(
+            features.dominant_frequency || 0
+        ).toFixed(1)} Hz`;
+
+
+    el.valZcr.textContent =
+        Number(
+            features.zero_crossing_rate || 0
+        ).toFixed(3);
+
+
+    /* Session log */
+
+    if (
+        data.label &&
+        data.label !== lastLoggedLabel
+    ) {
+
+        appendLogRow(
+            data.label,
+            data.confidence
+        );
+
+        lastLoggedLabel =
+            data.label;
+    }
 }
+
+
+/* ============================================================
+   PROBABILITY BARS
+   ============================================================ */
 
 function renderProbBars(probabilities) {
-  el.probBars.innerHTML = "";
-  Object.entries(probabilities).sort((a, b) => b[1] - a[1]).forEach(([label, prob]) => {
-    const row = document.createElement("div");
-    row.className = "prob-row";
+
+    el.probBars.innerHTML = "";
+
+
+    Object
+        .entries(probabilities)
+        .sort(
+            (a, b) => b[1] - a[1]
+        )
+        .forEach(
+            ([label, probability]) => {
+
+                const row =
+                    document.createElement("div");
+
+                row.className =
+                    "prob-row";
+
+
+                const percentage =
+                    Math.max(
+                        0,
+                        Math.min(
+                            100,
+                            probability * 100
+                        )
+                    );
+
+
+                row.innerHTML = `
+
+                    <span>
+                        ${label}
+                    </span>
+
+                    <span class="prob-track">
+
+                        <span
+                            class="prob-fill"
+                            style="
+                                width:
+                                ${percentage.toFixed(0)}%
+                            "
+                        ></span>
+
+                    </span>
+
+                    <span>
+                        ${percentage.toFixed(0)}%
+                    </span>
+
+                `;
+
+
+                el.probBars.appendChild(row);
+            }
+        );
+}
+
+
+/* ============================================================
+   SESSION LOG
+   ============================================================ */
+
+function appendLogRow(
+    label,
+    confidence
+) {
+
+    const row =
+        document.createElement("tr");
+
+
+    const time =
+        new Date().toLocaleTimeString(
+            "en-GB",
+            {
+                hour12: false
+            }
+        );
+
+
     row.innerHTML = `
-      <span>${label}</span>
-      <span class="prob-track"><span class="prob-fill" style="width:${(prob * 100).toFixed(0)}%"></span></span>
-      <span>${(prob * 100).toFixed(0)}%</span>`;
-    el.probBars.appendChild(row);
-  });
+
+        <td>
+            ${time}
+        </td>
+
+        <td>
+            ${label}
+        </td>
+
+        <td>
+            ${(
+                confidence * 100
+            ).toFixed(0)}%
+        </td>
+
+    `;
+
+
+    el.logBody.prepend(row);
+
+
+    while (
+        el.logBody.rows.length > 30
+    ) {
+
+        el.logBody.deleteRow(-1);
+    }
 }
 
-function appendLogRow(label, confidence) {
-  const row = document.createElement("tr");
-  const time = new Date().toLocaleTimeString("en-GB", { hour12: false });
-  row.innerHTML = `<td>${time}</td><td>${label}</td><td>${(confidence * 100).toFixed(0)}%</td>`;
-  el.logBody.prepend(row);
-  while (el.logBody.rows.length > 30) el.logBody.deleteRow(-1);
-}
 
-function renderSpectrumFromFeatures(data) {
-  const dominant = data.features.dominant_frequency;
-  const bins = Array.from({ length: 20 }, (_, i) => (i * 2.5).toFixed(1));
-  const magnitudes = bins.map((freqStr) => {
-    const distance = Math.abs(parseFloat(freqStr) - dominant);
-    return Math.max(0, 1 - distance / 8) * (0.5 + data.confidence);
-  });
-  spectrumChart.data.labels = bins;
-  spectrumChart.data.datasets[0].data = magnitudes;
-  spectrumChart.update();
-}
+/* ============================================================
+   MAIN POLLING LOOP
+   ============================================================ */
 
 async function pollLoop() {
-  try {
-    await Promise.all([pollWaveform(), pollMetrics()]);
-    setConnectionState(true);
-  } catch (err) {
-    setConnectionState(false);
-  }
+
+    try {
+
+        await Promise.all([
+            pollWaveform(),
+            pollMetrics()
+        ]);
+
+        setConnectionState(true);
+
+    } catch (error) {
+
+        console.error(
+            "Polling error:",
+            error
+        );
+
+        setConnectionState(false);
+    }
 }
+
 
 function startPolling() {
-  if (state.pollHandle) clearInterval(state.pollHandle);
-  pollLoop();
-  state.pollHandle = setInterval(pollLoop, POLL_INTERVAL_MS);
+
+    if (state.pollHandle) {
+
+        clearInterval(
+            state.pollHandle
+        );
+    }
+
+
+    pollLoop();
+
+
+    state.pollHandle =
+        setInterval(
+            pollLoop,
+            POLL_INTERVAL_MS
+        );
 }
 
-// AI: status diagnosis
-el.runDiagnosisBtn.addEventListener("click", async () => {
-  el.runDiagnosisBtn.disabled = true;
-  el.runDiagnosisBtn.textContent = "Analyzing…";
-  el.statusBody.innerHTML = `<p class="status-placeholder">Reading current sensor data…</p>`;
 
-  try {
-    const result = await apiPost("/api/ai/status", {});
-    el.statusBody.innerHTML = `<p class="status-text"></p>`;
-    el.statusBody.querySelector(".status-text").textContent = result.status_text;
-    el.statusMeta.textContent = `Based on: ${result.based_on.label} (${(result.based_on.confidence * 100).toFixed(0)}% confidence) — generated ${new Date().toLocaleTimeString("en-GB", { hour12: false })}`;
-  } catch (err) {
-    el.statusBody.innerHTML = `<p class="status-placeholder">${err.message}</p>`;
-  } finally {
-    el.runDiagnosisBtn.disabled = false;
-    el.runDiagnosisBtn.textContent = "Analyze now";
-  }
-});
+/* ============================================================
+   AI — STATUS DIAGNOSIS
+   ============================================================ */
 
-// AI: chat
-function appendChatMessage(role, content) {
-  const wrap = document.createElement("div");
-  wrap.className = `chat-msg ${role}`;
-  const bubble = document.createElement("div");
-  bubble.className = "chat-bubble";
-  bubble.textContent = content;
-  wrap.appendChild(bubble);
-  el.chatMessages.appendChild(wrap);
-  el.chatMessages.scrollTop = el.chatMessages.scrollHeight;
-  return bubble;
+el.runDiagnosisBtn.addEventListener(
+    "click",
+    async () => {
+
+        el.runDiagnosisBtn.disabled =
+            true;
+
+        el.runDiagnosisBtn.textContent =
+            "Analyzing…";
+
+
+        el.statusBody.innerHTML = `
+
+            <p class="status-placeholder">
+                Reading current sensor data…
+            </p>
+
+        `;
+
+
+        try {
+
+            const result =
+                await apiPost(
+                    "/api/ai/status",
+                    {}
+                );
+
+
+            el.statusBody.innerHTML = `
+
+                <p class="status-text"></p>
+
+            `;
+
+
+            el.statusBody
+                .querySelector(
+                    ".status-text"
+                )
+                .textContent =
+                result.status_text;
+
+
+            el.statusMeta.textContent =
+                `Based on: ${
+                    result.based_on.label
+                } (${
+                    (
+                        result.based_on.confidence *
+                        100
+                    ).toFixed(0)
+                }% confidence) — generated ${
+                    new Date().toLocaleTimeString(
+                        "en-GB",
+                        {
+                            hour12: false
+                        }
+                    )
+                }`;
+
+        } catch (error) {
+
+            console.error(
+                "AI diagnosis error:",
+                error
+            );
+
+
+            el.statusBody.innerHTML = `
+
+                <p class="status-placeholder">
+                    ${escapeHTML(error.message)}
+                </p>
+
+            `;
+
+        } finally {
+
+            el.runDiagnosisBtn.disabled =
+                false;
+
+            el.runDiagnosisBtn.textContent =
+                "Analyze now";
+        }
+    }
+);
+
+
+/* ============================================================
+   AI RESPONSE FORMATTING
+   ============================================================ */
+
+/*
+ * Escape HTML so AI-generated text cannot
+ * accidentally inject HTML into the page.
+ */
+
+function escapeHTML(value) {
+
+    return String(value)
+
+        .replace(
+            /&/g,
+            "&amp;"
+        )
+
+        .replace(
+            /</g,
+            "&lt;"
+        )
+
+        .replace(
+            />/g,
+            "&gt;"
+        )
+
+        .replace(
+            /"/g,
+            "&quot;"
+        )
+
+        .replace(
+            /'/g,
+            "&#039;"
+        );
 }
 
-el.chatForm.addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const message = el.chatInput.value.trim();
-  if (!message) return;
 
-  appendChatMessage("user", message);
-  state.chatHistory.push({ role: "user", content: message });
-  el.chatInput.value = "";
+/*
+ * Converts simple Markdown-style AI output
+ * into a professional PhytoSense layout.
+ */
 
-  const thinkingBubble = appendChatMessage("assistant", "Thinking…");
+function formatAIResponse(content) {
 
-  try {
-    const result = await apiPost("/api/ai/chat", { message, history: state.chatHistory });
-    thinkingBubble.textContent = result.reply;
-    state.chatHistory.push({ role: "assistant", content: result.reply });
-  } catch (err) {
-    thinkingBubble.textContent = `Couldn't get a response: ${err.message}`;
-  }
-});
+    const text =
+        String(content || "").trim();
 
-el.chatInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey) {
-    e.preventDefault();
-    el.chatForm.requestSubmit();
-  }
-});
 
-// Boot — start polling immediately, no connect step
+    if (!text) {
+
+        return `
+            <p class="ai-empty">
+                No analysis was returned.
+            </p>
+        `;
+    }
+
+
+    const lines =
+        text
+            .split(/\r?\n/)
+            .map(
+                (line) => line.trim()
+            )
+            .filter(
+                (line) =>
+                    line.length > 0
+            );
+
+
+    const blocks = [];
+    let listItems = [];
+
+
+    function flushList() {
+
+        if (!listItems.length) {
+            return;
+        }
+
+
+        blocks.push(`
+
+            <ul class="ai-list">
+
+                ${listItems.join("")}
+
+            </ul>
+
+        `);
+
+
+        listItems = [];
+    }
+
+
+    function formatInline(value) {
+
+        let html =
+            escapeHTML(value);
+
+
+        /* Bold */
+
+        html =
+            html.replace(
+                /\*\*(.+?)\*\*/g,
+                "<strong>$1</strong>"
+            );
+
+
+        /* Italic */
+
+        html =
+            html.replace(
+                /(^|[^\*])\*([^*]+)\*(?!\*)/g,
+                "$1<em>$2</em>"
+            );
+
+
+        /* Inline code */
+
+        html =
+            html.replace(
+                /`([^`]+)`/g,
+                "<code>$1</code>"
+            );
+
+
+        return html;
+    }
+
+
+    for (const line of lines) {
+
+        /* Bullet points */
+
+        const bulletMatch =
+            line.match(
+                /^[-*•]\s+(.+)$/
+            );
+
+
+        if (bulletMatch) {
+
+            listItems.push(`
+
+                <li>
+                    ${formatInline(
+                        bulletMatch[1]
+                    )}
+                </li>
+
+            `);
+
+            continue;
+        }
+
+
+        flushList();
+
+
+        /* Markdown headings */
+
+        const headingMatch =
+            line.match(
+                /^#{1,3}\s+(.+)$/
+            );
+
+
+        if (headingMatch) {
+
+            blocks.push(`
+
+                <h4 class="ai-section-title">
+
+                    ${formatInline(
+                        headingMatch[1]
+                    )}
+
+                </h4>
+
+            `);
+
+            continue;
+        }
+
+
+        /*
+         * Bold-only headings such as:
+         *
+         * **Current Assessment**
+         * **Sensor Interpretation**
+         * **Recommendation**
+         */
+
+        const boldOnlyMatch =
+            line.match(
+                /^\*\*(.+?)\*\*:?$/
+            );
+
+
+        if (boldOnlyMatch) {
+
+            blocks.push(`
+
+                <h4 class="ai-section-title">
+
+                    ${formatInline(
+                        boldOnlyMatch[1]
+                    )}
+
+                </h4>
+
+            `);
+
+            continue;
+        }
+
+
+        /* Normal paragraph */
+
+        blocks.push(`
+
+            <p class="ai-paragraph">
+
+                ${formatInline(line)}
+
+            </p>
+
+        `);
+    }
+
+
+    flushList();
+
+
+    return `
+
+        <div class="ai-response-card">
+
+            <div class="ai-response-header">
+
+                <span class="ai-response-icon">
+                    ✦
+                </span>
+
+                <span>
+                    PhytoSense AI
+                </span>
+
+            </div>
+
+
+            <div class="ai-response-content">
+
+                ${blocks.join("")}
+
+            </div>
+
+
+            <div class="ai-response-footer">
+
+                AI interpretation based on
+                current sensor readings
+
+            </div>
+
+        </div>
+
+    `;
+}
+
+
+/* ============================================================
+   AI RESPONSE STYLES
+   ============================================================ */
+
+function installAIResponseStyles() {
+
+    if (
+        document.getElementById(
+            "phyto-ai-response-styles"
+        )
+    ) {
+        return;
+    }
+
+
+    const style =
+        document.createElement("style");
+
+
+    style.id =
+        "phyto-ai-response-styles";
+
+
+    style.textContent = `
+
+        .chat-msg.assistant
+        .chat-bubble {
+
+            max-width:
+                min(760px, 92%);
+
+            line-height:
+                1.65;
+        }
+
+
+        .ai-response-card {
+
+            overflow:
+                hidden;
+
+            border:
+                1px solid
+                rgba(
+                    127,
+                    184,
+                    143,
+                    0.20
+                );
+
+            border-radius:
+                14px;
+
+            background:
+                linear-gradient(
+                    145deg,
+                    rgba(
+                        127,
+                        184,
+                        143,
+                        0.055
+                    ),
+                    rgba(
+                        255,
+                        255,
+                        255,
+                        0.018
+                    )
+                );
+
+            box-shadow:
+                0 10px 30px
+                rgba(
+                    0,
+                    0,
+                    0,
+                    0.12
+                );
+        }
+
+
+        .ai-response-header {
+
+            display:
+                flex;
+
+            align-items:
+                center;
+
+            gap:
+                9px;
+
+            padding:
+                11px 14px;
+
+            border-bottom:
+                1px solid
+                rgba(
+                    255,
+                    255,
+                    255,
+                    0.055
+                );
+
+            color:
+                #9ed2ad;
+
+            font-size:
+                11px;
+
+            font-weight:
+                600;
+
+            letter-spacing:
+                0.08em;
+
+            text-transform:
+                uppercase;
+        }
+
+
+        .ai-response-icon {
+
+            display:
+                inline-flex;
+
+            align-items:
+                center;
+
+            justify-content:
+                center;
+
+            width:
+                20px;
+
+            height:
+                20px;
+
+            border-radius:
+                50%;
+
+            background:
+                rgba(
+                    127,
+                    184,
+                    143,
+                    0.12
+                );
+
+            font-size:
+                12px;
+        }
+
+
+        .ai-response-content {
+
+            padding:
+                14px 16px 12px;
+        }
+
+
+        .ai-section-title {
+
+            margin:
+                15px 0 7px;
+
+            color:
+                #b7ddc1;
+
+            font-size:
+                12px;
+
+            font-weight:
+                600;
+
+            letter-spacing:
+                0.04em;
+
+            text-transform:
+                uppercase;
+        }
+
+
+        .ai-section-title:first-child {
+
+            margin-top:
+                0;
+        }
+
+
+        .ai-paragraph {
+
+            margin:
+                0 0 9px;
+
+            color:
+                rgba(
+                    255,
+                    255,
+                    255,
+                    0.88
+                );
+
+            font-size:
+                13px;
+        }
+
+
+        .ai-paragraph:last-child {
+
+            margin-bottom:
+                0;
+        }
+
+
+        .ai-paragraph strong {
+
+            color:
+                #e4f3e7;
+
+            font-weight:
+                600;
+        }
+
+
+        .ai-list {
+
+            margin:
+                5px 0 11px;
+
+            padding-left:
+                20px;
+
+            color:
+                rgba(
+                    255,
+                    255,
+                    255,
+                    0.86
+                );
+
+            font-size:
+                13px;
+        }
+
+
+        .ai-list li {
+
+            margin:
+                5px 0;
+
+            padding-left:
+                3px;
+        }
+
+
+        .ai-list li::marker {
+
+            color:
+                #7fb88f;
+        }
+
+
+        .ai-response-content code {
+
+            padding:
+                2px 5px;
+
+            border-radius:
+                4px;
+
+            background:
+                rgba(
+                    255,
+                    255,
+                    255,
+                    0.06
+                );
+
+            color:
+                #b7ddc1;
+
+            font-family:
+                "IBM Plex Mono",
+                monospace;
+
+            font-size:
+                0.9em;
+        }
+
+
+        .ai-response-footer {
+
+            padding:
+                9px 14px;
+
+            border-top:
+                1px solid
+                rgba(
+                    255,
+                    255,
+                    255,
+                    0.045
+                );
+
+            color:
+                rgba(
+                    255,
+                    255,
+                    255,
+                    0.40
+                );
+
+            font-size:
+                10px;
+
+            letter-spacing:
+                0.02em;
+        }
+
+
+        .ai-empty {
+
+            margin:
+                0;
+
+            color:
+                rgba(
+                    255,
+                    255,
+                    255,
+                    0.60
+                );
+        }
+
+    `;
+
+
+    document.head.appendChild(style);
+}
+
+
+/* ============================================================
+   AI — CHAT
+   ============================================================ */
+
+function appendChatMessage(
+    role,
+    content
+) {
+
+    const wrapper =
+        document.createElement("div");
+
+
+    wrapper.className =
+        `chat-msg ${role}`;
+
+
+    const bubble =
+        document.createElement("div");
+
+
+    bubble.className =
+        "chat-bubble";
+
+
+    /*
+     * AI messages are professionally formatted.
+     *
+     * The temporary "Thinking…" message stays
+     * as normal text.
+     */
+
+    if (
+        role === "assistant" &&
+        content !== "Thinking…"
+    ) {
+
+        bubble.innerHTML =
+            formatAIResponse(content);
+
+    } else {
+
+        bubble.textContent =
+            content;
+    }
+
+
+    wrapper.appendChild(
+        bubble
+    );
+
+
+    el.chatMessages.appendChild(
+        wrapper
+    );
+
+
+    el.chatMessages.scrollTop =
+        el.chatMessages.scrollHeight;
+
+
+    return bubble;
+}
+
+
+/* Install AI response styles */
+
+installAIResponseStyles();
+
+
+/* ============================================================
+   CHAT FORM
+   ============================================================ */
+
+el.chatForm.addEventListener(
+    "submit",
+    async (event) => {
+
+        event.preventDefault();
+
+
+        const message =
+            el.chatInput.value.trim();
+
+
+        if (!message) {
+            return;
+        }
+
+
+        /* User message */
+
+        appendChatMessage(
+            "user",
+            message
+        );
+
+
+        state.chatHistory.push({
+            role: "user",
+            content: message
+        });
+
+
+        el.chatInput.value = "";
+
+
+        /* Thinking message */
+
+        const thinkingBubble =
+            appendChatMessage(
+                "assistant",
+                "Thinking…"
+            );
+
+
+        try {
+
+            const result =
+                await apiPost(
+                    "/api/ai/chat",
+                    {
+                        message,
+
+                        history:
+                            state.chatHistory
+                    }
+                );
+
+
+            /*
+             * Replace "Thinking…" with
+             * the formatted AI response.
+             */
+
+            thinkingBubble.innerHTML =
+                formatAIResponse(
+                    result.reply
+                );
+
+
+            state.chatHistory.push({
+                role: "assistant",
+                content: result.reply
+            });
+
+
+            el.chatMessages.scrollTop =
+                el.chatMessages.scrollHeight;
+
+
+        } catch (error) {
+
+            console.error(
+                "AI chat error:",
+                error
+            );
+
+
+            thinkingBubble.textContent =
+                `Couldn't get a response: ${
+                    error.message
+                }`;
+        }
+    }
+);
+
+
+/* ============================================================
+   ENTER TO SEND CHAT
+   ============================================================ */
+
+el.chatInput.addEventListener(
+    "keydown",
+    (event) => {
+
+        if (
+            event.key === "Enter" &&
+            !event.shiftKey
+        ) {
+
+            event.preventDefault();
+
+            el.chatForm.requestSubmit();
+        }
+    }
+);
+
+
+/* ============================================================
+   BOOT
+   ============================================================ */
+
+console.log(
+    "PhytoSense frontend starting..."
+);
+
+
+console.log(
+    "Chart.js:",
+    Chart.version
+);
+
+
+console.log(
+    "Backend:",
+    BACKEND_URL
+);
+
+
 startPolling();
