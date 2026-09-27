@@ -3,7 +3,7 @@
   Pin map matches the PhytoSense Wiring Manual (Beginner edition), page 16.
 
   Reads the AD8232 plant-signal amplifier, the LDR light sensor and the
-  DHT22 temperature/humidity sensor, and POSTs a batch of readings once
+  DHT11 temperature/humidity sensor, and POSTs a batch of readings once
   per second to the PhytoSense backend running on your laptop.
 
   Needs only one extra library: "DHT sensor library" by Adafruit.
@@ -20,10 +20,10 @@
 #define PIN_AD8232_LOP 35   // D35 - lead-off plus  (input only)
 #define PIN_AD8232_SDN 32   // D32 - HIGH = AD8232 running
 #define PIN_LDR        33   // D33 - analog, ADC1_CH5
-#define PIN_DHT22      27   // D27 - digital data line
+#define PIN_DHT        27   // D27 - DHT11 data line
 
-#define DHTTYPE DHT22
-DHT dht(PIN_DHT22, DHTTYPE);
+#define DHTTYPE DHT11      // blue 4-pin sensor = DHT11 (a DHT22 is white)
+DHT dht(PIN_DHT, DHTTYPE);
 
 // ---- Timing -------------------------------------------------------------
 const int SAMPLES_PER_BATCH = 10;           // 10 samples = 1 second of data per send
@@ -31,7 +31,7 @@ const int READS_PER_SAMPLE  = 100;          // each sample = average of 100 read
 const unsigned long READ_INTERVAL_US = 1000; // ...taken 1 ms apart = 100 ms window.
                                             // Averaging over exactly 100 ms cancels
                                             // 50 Hz mains hum (5 full cycles).
-const unsigned long DHT_READ_MS = 2000;     // DHT22 can't be read faster than this
+const unsigned long DHT_READ_MS = 2000;     // DHT11 needs at least 1 s between reads
 const unsigned long WIFI_TIMEOUT_MS = 20000;
 
 unsigned long lastDhtTime = 0;
@@ -94,7 +94,7 @@ void readDhtIfDue() {
     lastHumidity = h;
     lastTempC = t;
   } else {
-    Serial.println("DHT22 read failed (check wiring / 4.7k pull-up)");
+    Serial.println("DHT11 read failed (check wiring / 4.7k pull-up)");
   }
 }
 
@@ -116,13 +116,19 @@ void sendBatch(float *samples, int count, bool leadOff) {
   body += ",\"uptime_s\":" + String(millis() / 1000.0, 1);
   body += "}";
 
-  HTTPClient http;
-  http.setTimeout(3000);   // don't hang if the laptop server is off
-  http.begin(String(SERVER_URL) + "/api/ingest");
-  http.addHeader("Content-Type", "application/json");
-  http.addHeader("X-Device-Token", DEVICE_TOKEN);
-  int code = http.POST(body);
-  http.end();
+  // Try up to 2 times: a phone hotspot sometimes drops a single request
+  int code = -1;
+  for (int attempt = 1; attempt <= 2; attempt++) {
+    HTTPClient http;
+    http.setTimeout(3000);   // don't hang if the laptop server is off
+    http.begin(String(SERVER_URL) + "/api/ingest");
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("X-Device-Token", DEVICE_TOKEN);
+    code = http.POST(body);
+    http.end();
+    if (code > 0) break;     // got an answer from the server, no need to retry
+    delay(200);
+  }
 
   Serial.print("POST -> ");
   Serial.print(code);

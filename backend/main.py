@@ -9,22 +9,27 @@ from llm_service import PlantLLM
 app = Flask(__name__)
 CORS(app)  # Allows frontend on port 5500 to fetch data from port 5000
 
-SIM_STREAM = SensorStream(sample_rate=100)          # fallback so the dashboard never goes blank
-DEVICE = IngestBuffer(max_seconds=20, expected_rate=10)   # fills up once your ESP32 talks to us
+# Samples per second for each data source
+SIM_RATE = 100      # built-in simulator
+DEVICE_RATE = 10    # real ESP32 (firmware sends 10 averaged samples per second)
+
+SIM_STREAM = SensorStream(sample_rate=SIM_RATE)                    # fallback so the dashboard never goes blank
+DEVICE = IngestBuffer(max_seconds=20, expected_rate=DEVICE_RATE)   # fills up once your ESP32 talks to us
 DEVICE_TOKEN = os.getenv("DEVICE_TOKEN", "phytosense-dev-token")
 
-dsp = BioSignalDSP(sample_rate=100)
-classifier = PlantClassifier(sample_rate=100)
+dsp = BioSignalDSP()
+classifier = PlantClassifier(sample_rate=SIM_RATE)
 llm = PlantLLM()
 
 latest_metrics = {}
 
 
 def get_raw_window():
-    """Real ESP32 data if it has spoken to us recently, otherwise the simulator."""
+    """Real ESP32 data if it has spoken to us recently, otherwise the simulator.
+    Returns (samples, source, sample_rate)."""
     if DEVICE.is_online():
-        return DEVICE.get_latest_window(), "device"
-    return SIM_STREAM.get_latest_window(), "simulated"
+        return DEVICE.get_latest_window(), "device", DEVICE_RATE
+    return SIM_STREAM.get_latest_window(), "simulated", SIM_RATE
 
 
 @app.route('/api/ingest', methods=['POST'])
@@ -62,19 +67,20 @@ def device_status():
 
 @app.route('/api/waveform', methods=['GET'])
 def get_waveform():
-    raw, source = get_raw_window()
-    filtered = dsp.process(raw) if raw else []
-    return jsonify({"raw": raw, "filtered": list(filtered), "source": source})
+    raw, source, rate = get_raw_window()
+    filtered = dsp.process(raw, rate) if raw else []
+    return jsonify({"raw": raw, "filtered": list(filtered), "source": source, "sample_rate": rate})
 
 
 @app.route('/api/metrics', methods=['GET'])
 def get_metrics():
     global latest_metrics
-    raw, source = get_raw_window()
+    raw, source, rate = get_raw_window()
     if len(raw) < 50:
         return jsonify({"ready": False, "source": source})
 
-    filtered = dsp.process(raw)
+    filtered = dsp.process(raw, rate)
+    classifier.sample_rate = rate   # so the dominant frequency is calculated correctly
     features = classifier.extract_features(filtered)
     classification = classifier.classify(features)
 
@@ -108,4 +114,4 @@ def ai_chat():
 
 
 if __name__ == '__main__':
-           app.run(host="0.0.0.0", port=5000, debug=True, use_reloader=False)
+    app.run(host="0.0.0.0", port=5000, debug=True, use_reloader=False)

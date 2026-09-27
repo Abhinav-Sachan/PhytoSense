@@ -68,6 +68,18 @@ const el = {
     valZcr:
         document.getElementById("valZcr"),
 
+    valTemp:
+        document.getElementById("valTemp"),
+
+    valHumidity:
+        document.getElementById("valHumidity"),
+
+    valLight:
+        document.getElementById("valLight"),
+
+    valElectrodes:
+        document.getElementById("valElectrodes"),
+
     logBody:
         document.getElementById("logBody"),
 
@@ -983,13 +995,64 @@ function appendLogRow(
    MAIN POLLING LOOP
    ============================================================ */
 
+/* ============================================================
+   ENVIRONMENT (DHT11 + LDR + electrode status from the ESP32)
+   ============================================================ */
+
+function formatReading(value, decimals, unit) {
+
+    if (value === null || value === undefined) {
+        return "—";
+    }
+
+    return `${Number(value).toFixed(decimals)}${unit}`;
+}
+
+
+async function pollEnvironment() {
+
+    const data =
+        await apiGet("/api/device/status");
+
+    const t =
+        (data && data.online && data.telemetry) || {};
+
+    el.valTemp.textContent =
+        formatReading(t.temp_c, 1, " °C");
+
+    el.valHumidity.textContent =
+        formatReading(t.humidity_pct, 0, " %");
+
+    el.valLight.textContent =
+        formatReading(t.light_pct, 0, " %");
+
+    /* lead_off = true means the AD8232 sees no electrode contact */
+    if (!data || !data.online) {
+
+        el.valElectrodes.textContent = "—";
+        el.valElectrodes.classList.remove("warn");
+
+    } else {
+
+        el.valElectrodes.textContent =
+            t.lead_off ? "Not attached" : "Attached";
+
+        el.valElectrodes.classList.toggle(
+            "warn",
+            Boolean(t.lead_off)
+        );
+    }
+}
+
+
 async function pollLoop() {
 
     try {
 
         await Promise.all([
             pollWaveform(),
-            pollMetrics()
+            pollMetrics(),
+            pollEnvironment()
         ]);
 
         setConnectionState(true);

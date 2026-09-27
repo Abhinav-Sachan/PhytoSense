@@ -264,6 +264,8 @@ h1, h2, h3 { font-family: var(--font-ui); }
 .readout { display: flex; flex-direction: column; gap: 4px; padding: 10px 0; border-top: 1px solid var(--border-soft); }
 .readout-label { font-size: 11px; color: var(--text-faint); }
 .readout-value { font-family: var(--font-mono); font-size: 16px; font-weight: 500; }
+.readout-value.warn { color: var(--accent-amber); }
+.readout-section-title { margin: 22px 0 6px; font-size: 12px; font-weight: 600; color: var(--text-muted); }
 
 .log-table-wrap { max-height: 220px; overflow-y: auto; }
 .log-table { width: 100%; border-collapse: collapse; font-size: 12px; }
