@@ -1,6 +1,6 @@
 /*
   PhytoSense ESP32 firmware
-  Pin map matches the PhytoSense Wiring Manual (Beginner edition), page 16.
+  Pin map matches the ACTUAL wiring on the breadboard (checked 27-09-2026).
 
   Reads the AD8232 plant-signal amplifier, the LDR light sensor and the
   DHT11 temperature/humidity sensor, and POSTs a batch of readings once
@@ -14,13 +14,14 @@
 #include <DHT.h>
 #include "secrets.h"
 
-// ---- Pins (from the wiring manual, page 16) ---------------------------
-#define PIN_AD8232_OUT 36   // VP  - analog, ADC1_CH0
-#define PIN_AD8232_LOM 34   // D34 - lead-off minus (input only)
-#define PIN_AD8232_LOP 35   // D35 - lead-off plus  (input only)
-#define PIN_AD8232_SDN 32   // D32 - HIGH = AD8232 running
-#define PIN_LDR        33   // D33 - analog, ADC1_CH5
+// ---- Pins (actual breadboard wiring) ------------------------------------
+#define PIN_AD8232_OUT 34   // D34 - AD8232 OUTPUT, analog (ADC1_CH6)
+#define PIN_AD8232_LOM 33   // D33 - AD8232 LO- (lead-off minus), digital input
+#define PIN_AD8232_LOP 32   // D32 - AD8232 LO+ (lead-off plus),  digital input
+#define PIN_LDR        35   // D35 - LDR / resistor divider, analog (ADC1_CH7)
 #define PIN_DHT        27   // D27 - DHT11 data line
+// AD8232 SDN is not connected: the SparkFun board then stays switched on.
+// Never set LO+/LO- pins as OUTPUT - they are outputs of the AD8232.
 
 #define DHTTYPE DHT11      // blue 4-pin sensor = DHT11 (a DHT22 is white)
 DHT dht(PIN_DHT, DHTTYPE);
@@ -146,8 +147,6 @@ void setup() {
 
   pinMode(PIN_AD8232_LOM, INPUT);
   pinMode(PIN_AD8232_LOP, INPUT);
-  pinMode(PIN_AD8232_SDN, OUTPUT);
-  digitalWrite(PIN_AD8232_SDN, HIGH);   // turn the AD8232 ON
 
   analogReadResolution(12);
   dht.begin();
