@@ -15,7 +15,10 @@
 
 const BACKEND_URL = "http://127.0.0.1:5000";
 const POLL_INTERVAL_MS = 1000;
-const SAMPLE_RATE = 100;
+/* Samples per second of the waveform the backend sends:
+   real ESP32 = 10 per second, built-in simulator = 100 per second */
+const SAMPLE_RATE_DEVICE = 10;
+const SAMPLE_RATE_SIMULATED = 100;
 
 
 /* ============================================================
@@ -27,6 +30,7 @@ const state = {
     pollHandle: null,
     traceMode: "filtered",
     currentView: "home",
+    source: null,          // "device" (real ESP32) or "simulated"
     chatHistory: []
 };
 
@@ -148,9 +152,11 @@ function setConnectionState(online) {
     if (statusText) {
 
         statusText.textContent =
-            online
-                ? "Connected"
-                : "Backend offline";
+            !online
+                ? "Backend offline"
+                : state.source === "device"
+                    ? "Live: ESP32"
+                    : "Simulated data";
     }
 }
 
@@ -484,7 +490,7 @@ document
    REAL FFT CALCULATION
    ============================================================ */
 
-function calculateSpectrum(signal) {
+function calculateSpectrum(signal, sampleRate) {
 
     if (!signal || signal.length < 4) {
 
@@ -664,7 +670,7 @@ function calculateSpectrum(signal) {
     ) {
 
         const frequency =
-            (i * SAMPLE_RATE) / n;
+            (i * sampleRate) / n;
 
         const magnitude =
             Math.sqrt(
@@ -696,8 +702,13 @@ function calculateSpectrum(signal) {
 
 function renderSpectrum(signal) {
 
+    const sampleRate =
+        state.source === "device"
+            ? SAMPLE_RATE_DEVICE
+            : SAMPLE_RATE_SIMULATED;
+
     const spectrum =
-        calculateSpectrum(signal);
+        calculateSpectrum(signal, sampleRate);
 
     spectrumChart.data.labels =
         spectrum.frequencies;
@@ -724,6 +735,10 @@ async function pollWaveform() {
     if (!data) {
         return;
     }
+
+
+    /* Remember where this data came from (real ESP32 or simulator) */
+    state.source = data.source;
 
 
     const filtered =
@@ -1822,6 +1837,11 @@ el.chatForm.addEventListener(
         );
 
 
+        /* History BEFORE this message: the backend adds the new message itself */
+        const previousHistory =
+            state.chatHistory.slice();
+
+
         state.chatHistory.push({
             role: "user",
             content: message
@@ -1849,7 +1869,7 @@ el.chatForm.addEventListener(
                         message,
 
                         history:
-                            state.chatHistory
+                            previousHistory
                     }
                 );
 
@@ -1887,6 +1907,10 @@ el.chatForm.addEventListener(
                 `Couldn't get a response: ${
                     error.message
                 }`;
+
+
+            /* Remove the unanswered message so history stays clean */
+            state.chatHistory.pop();
         }
     }
 );
