@@ -107,6 +107,8 @@ h1, h2, h3 { font-family: var(--font-ui); }
 .status[data-state="online"] .status-text { color: var(--trace-green); }
 .status[data-state="offline"] .status-dot { background: var(--accent-red); }
 .status[data-state="offline"] .status-text { color: var(--accent-red); }
+.status[data-state="waiting"] .status-dot { background: var(--accent-amber); }
+.status[data-state="waiting"] .status-text { color: var(--accent-amber); }
 
 /* ==========================================================================
    Views (SPA panes)

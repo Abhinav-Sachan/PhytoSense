@@ -13,7 +13,11 @@ CORS(app)  # Allows frontend on port 5500 to fetch data from port 5000
 SIM_RATE = 100      # built-in simulator
 DEVICE_RATE = 10    # real ESP32 (firmware sends 10 averaged samples per second)
 
-SIM_STREAM = SensorStream(sample_rate=SIM_RATE)                    # fallback so the dashboard never goes blank
+# Simulator is OFF by default so fake data can never mix with real plant data.
+# To test without the ESP32, start the server with:  $env:USE_SIMULATOR="1"; python main.py
+USE_SIMULATOR = os.getenv("USE_SIMULATOR", "0") == "1"
+
+SIM_STREAM = SensorStream(sample_rate=SIM_RATE)                    # only used when USE_SIMULATOR is on
 DEVICE = IngestBuffer(max_seconds=20, expected_rate=DEVICE_RATE)   # fills up once your ESP32 talks to us
 DEVICE_TOKEN = os.getenv("DEVICE_TOKEN", "phytosense-dev-token")
 
@@ -25,11 +29,14 @@ latest_metrics = {}
 
 
 def get_raw_window():
-    """Real ESP32 data if it has spoken to us recently, otherwise the simulator.
-    Returns (samples, source, sample_rate)."""
+    """Returns (samples, source, sample_rate).
+    source is "device" (real ESP32), "simulated" (only if USE_SIMULATOR is on)
+    or "offline" (ESP32 silent, no data at all)."""
     if DEVICE.is_online():
         return DEVICE.get_latest_window(), "device", DEVICE_RATE
-    return SIM_STREAM.get_latest_window(), "simulated", SIM_RATE
+    if USE_SIMULATOR:
+        return SIM_STREAM.get_latest_window(), "simulated", SIM_RATE
+    return [], "offline", DEVICE_RATE
 
 
 @app.route('/api/ingest', methods=['POST'])
@@ -61,7 +68,7 @@ def device_status():
     return jsonify({
         "online": DEVICE.is_online(),
         "telemetry": DEVICE.latest_telemetry,
-        "source": "device" if DEVICE.is_online() else "simulated",
+        "source": get_raw_window()[1],
     })
 
 
@@ -77,6 +84,7 @@ def get_metrics():
     global latest_metrics
     raw, source, rate = get_raw_window()
     if len(raw) < 50:
+        latest_metrics = {}   # no fresh data -> the AI must not talk about old readings
         return jsonify({"ready": False, "source": source})
 
     filtered = dsp.process(raw, rate)

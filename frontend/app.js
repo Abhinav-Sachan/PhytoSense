@@ -155,8 +155,15 @@ function setConnectionState(online) {
         return;
     }
 
+    /* 3 colours: green = real ESP32 data,
+       amber = backend running but ESP32 silent (or simulator on),
+       red   = backend (main.py) not running */
     el.connectionStatus.dataset.state =
-        online ? "online" : "offline";
+        !online
+            ? "offline"
+            : state.source === "device"
+                ? "online"
+                : "waiting";
 
     const statusText =
         el.connectionStatus.querySelector(".status-text");
@@ -168,7 +175,9 @@ function setConnectionState(online) {
                 ? "Backend offline"
                 : state.source === "device"
                     ? "Live: ESP32"
-                    : "Simulated data";
+                    : state.source === "simulated"
+                        ? "Simulated data"
+                        : "ESP32 offline";
     }
 }
 
@@ -785,6 +794,11 @@ async function pollWaveform() {
 
     if (filtered.length > 0) {
         renderSpectrum(filtered);
+    } else {
+        /* No data (ESP32 offline): empty the spectrum too */
+        spectrumChart.data.labels = [];
+        spectrumChart.data.datasets[0].data = [];
+        spectrumChart.update("none");
     }
 }
 
@@ -801,7 +815,17 @@ async function pollMetrics() {
     const data =
         await apiGet("/api/metrics");
 
-    if (!data || !data.ready) {
+    if (!data) {
+        return;
+    }
+
+    if (!data.ready) {
+        /* Don't keep showing an old result when no data is coming in */
+        el.classLabel.textContent = "—";
+        el.classConfidence.textContent =
+            data.source === "offline"
+                ? "Waiting for ESP32…"
+                : "Collecting data…";
         return;
     }
 
