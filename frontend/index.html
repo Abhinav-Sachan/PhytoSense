@@ -183,6 +183,48 @@
         </div>
       </section>
 
+      <!-- Recording: saves labelled sessions for training the model -->
+      <section class="panel record-panel">
+        <div class="panel-header">
+          <h2>Recording</h2>
+          <span class="rec-badge" id="recBadge" data-state="idle">Idle</span>
+        </div>
+
+        <div class="rec-controls">
+          <label class="rec-field">
+            <span class="rec-field-label">Label</span>
+            <select id="recLabel">
+              <option value="baseline">baseline</option>
+              <option value="drought">drought</option>
+              <option value="mechanical">mechanical</option>
+              <option value="test">test</option>
+            </select>
+          </label>
+          <label class="rec-field rec-field-note">
+            <span class="rec-field-label">Note</span>
+            <input id="recNote" type="text" maxlength="200"
+                   placeholder="e.g. leaf 3, electrodes 2 cm apart, pinched leaf 5 at 1:00">
+          </label>
+          <button class="btn-primary small" id="recStartBtn">Start recording</button>
+          <button class="btn-stop small" id="recStopBtn" hidden>Stop</button>
+        </div>
+
+        <div class="rec-live" id="recLive">Not recording. Pick a label, add a note, then press Start.</div>
+        <div class="rec-msg" id="recMsg" hidden></div>
+
+        <h3 class="readout-section-title">Saved sessions</h3>
+        <div class="log-table-wrap">
+          <table class="log-table rec-table">
+            <thead>
+              <tr><th>#</th><th>Label</th><th>Note</th><th>Length</th><th>Samples</th><th>Leads off</th><th></th></tr>
+            </thead>
+            <tbody id="recSessionsBody">
+              <tr><td colspan="7" class="rec-empty">No sessions yet.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
     </div>
   </section>
 

@@ -1,10 +1,11 @@
 import os
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, Response
 from flask_cors import CORS
 from data_stream import SensorStream, IngestBuffer
 from dsp_filters import BioSignalDSP
 from ai_engine import PlantClassifier
 from llm_service import PlantLLM
+from recorder import Recorder
 
 app = Flask(__name__)
 CORS(app)  # Allows frontend on port 5500 to fetch data from port 5000
@@ -20,6 +21,8 @@ USE_SIMULATOR = os.getenv("USE_SIMULATOR", "0") == "1"
 SIM_STREAM = SensorStream(sample_rate=SIM_RATE)                    # only used when USE_SIMULATOR is on
 DEVICE = IngestBuffer(max_seconds=20, expected_rate=DEVICE_RATE)   # fills up once your ESP32 talks to us
 DEVICE_TOKEN = os.getenv("DEVICE_TOKEN", "phytosense-dev-token")
+
+RECORDER = Recorder(sample_rate=DEVICE_RATE)                      # saves labelled sessions to backend/data/phytosense.db
 
 dsp = BioSignalDSP()
 classifier = PlantClassifier(sample_rate=SIM_RATE)
@@ -59,8 +62,14 @@ def ingest():
         "rssi": data.get("rssi"),
         "uptime_s": data.get("uptime_s"),
     }
+    # Optional slow DC channel from the ADS1115 (not fitted yet -> usually missing)
+    dc_uv = data.get("dc_uv")
+    if not isinstance(dc_uv, list):
+        dc_uv = None
+
     DEVICE.push(samples, telemetry)
-    return jsonify({"ok": True, "received": len(samples)})
+    saved = RECORDER.add_batch(samples, telemetry, dc_uv)   # saves only while a recording is running
+    return jsonify({"ok": True, "received": len(samples), "recorded": saved})
 
 
 @app.route('/api/device/status', methods=['GET'])
@@ -100,6 +109,60 @@ def get_metrics():
     }
     return jsonify(latest_metrics)
 
+
+# ---- Recording (labelled sessions for training the model) -----------------
+
+@app.route('/api/record/status', methods=['GET'])
+def record_status():
+    status = RECORDER.status()
+    status["device_online"] = DEVICE.is_online()
+    return jsonify(status)
+
+
+@app.route('/api/record/start', methods=['POST'])
+def record_start():
+    if not DEVICE.is_online():
+        return jsonify({"error": "ESP32 is offline - connect it before recording"}), 409
+    data = request.json or {}
+    session, error = RECORDER.start(data.get("label"), data.get("note", ""))
+    if error:
+        return jsonify({"error": error}), 400
+    return jsonify({"ok": True, "session": session})
+
+
+@app.route('/api/record/stop', methods=['POST'])
+def record_stop():
+    session, error = RECORDER.stop()
+    if error:
+        return jsonify({"error": error}), 400
+    return jsonify({"ok": True, "session": session})
+
+
+@app.route('/api/record/sessions', methods=['GET'])
+def record_sessions():
+    return jsonify({"sessions": RECORDER.list_sessions()})
+
+
+@app.route('/api/record/sessions/<int:session_id>/csv', methods=['GET'])
+def record_export(session_id):
+    csv_text = RECORDER.export_csv(session_id)
+    if csv_text is None:
+        return jsonify({"error": "session not found"}), 404
+    session = RECORDER.get_session(session_id)
+    filename = f"phytosense_session{session_id}_{session['label']}.csv"
+    return Response(csv_text, mimetype="text/csv",
+                    headers={"Content-Disposition": f"attachment; filename={filename}"})
+
+
+@app.route('/api/record/sessions/<int:session_id>', methods=['DELETE'])
+def record_delete(session_id):
+    ok, error = RECORDER.delete_session(session_id)
+    if not ok:
+        return jsonify({"error": error}), 400
+    return jsonify({"ok": True})
+
+
+# ---- AI assistant ----------------------------------------------------------
 
 @app.route('/api/ai/status', methods=['POST'])
 def ai_status():

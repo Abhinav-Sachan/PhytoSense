@@ -826,6 +826,12 @@ async function pollMetrics() {
             data.source === "offline"
                 ? "Waiting for ESP32…"
                 : "Collecting data…";
+        renderProbBars({});
+        el.valRms.textContent = "—";
+        el.valPeak.textContent = "—";
+        el.valFreq.textContent = "—";
+        el.valZcr.textContent = "—";
+        lastLoggedLabel = null;
         return;
     }
 
@@ -1069,6 +1075,232 @@ async function pollEnvironment() {
 }
 
 
+/* ============================================================
+   RECORDING (labelled sessions for training the model)
+   ============================================================ */
+
+const rec = {
+    badge: document.getElementById("recBadge"),
+    label: document.getElementById("recLabel"),
+    note: document.getElementById("recNote"),
+    startBtn: document.getElementById("recStartBtn"),
+    stopBtn: document.getElementById("recStopBtn"),
+    live: document.getElementById("recLive"),
+    msg: document.getElementById("recMsg"),
+    sessionsBody: document.getElementById("recSessionsBody"),
+    wasRecording: null,     // so we only refresh the table when something changes
+    busy: false             // true while a Start/Stop request is on its way
+};
+
+
+function formatDuration(seconds) {
+
+    const total = Math.max(0, Math.round(seconds || 0));
+    const m = Math.floor(total / 60);
+    const s = total % 60;
+
+    return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
+
+function showRecMessage(text, isError = false) {
+
+    if (!text) {
+        rec.msg.hidden = true;
+        rec.msg.textContent = "";
+        return;
+    }
+
+    rec.msg.hidden = false;
+    rec.msg.textContent = text;
+    rec.msg.classList.toggle("error", isError);
+}
+
+
+/* Called every second from pollLoop */
+async function pollRecording() {
+
+    const data =
+        await apiGet("/api/record/status");
+
+    const recording = Boolean(data.recording);
+    const session = data.session;
+
+    /* Buttons and inputs */
+    rec.startBtn.hidden = recording;
+    rec.stopBtn.hidden = !recording;
+    rec.label.disabled = recording;
+    rec.note.disabled = recording;
+
+    if (!rec.busy) {
+        rec.startBtn.disabled = !data.device_online;
+        rec.startBtn.title = data.device_online
+            ? ""
+            : "Connect the ESP32 first";
+    }
+
+    /* Badge */
+    rec.badge.dataset.state = recording ? "recording" : "idle";
+    rec.badge.textContent = recording ? "● REC" : "Idle";
+
+    /* Live line */
+    if (recording && session) {
+
+        rec.live.classList.add("active");
+        rec.live.textContent =
+            `Session #${session.id} · ${session.label} · ` +
+            `${formatDuration(session.duration_s)} · ` +
+            `${session.sample_count} samples`;
+
+        /* Warnings that matter for data quality */
+        if (!data.device_online) {
+            showRecMessage("ESP32 offline: nothing is being saved right now.", true);
+        } else if (session.sample_count > 0 && session.lead_off_samples === session.sample_count) {
+            showRecMessage("Electrodes not attached: every sample so far is flagged lead_off.");
+        } else if (session.lead_off_samples > 0) {
+            showRecMessage(`${session.lead_off_samples} samples had an electrode off.`);
+        } else {
+            showRecMessage("");
+        }
+
+    } else {
+
+        rec.live.classList.remove("active");
+        rec.live.textContent = data.device_online
+            ? "Not recording. Pick a label, add a note, then press Start."
+            : "ESP32 offline. Connect it to start recording.";
+    }
+
+    /* Refresh the sessions table when recording starts/stops */
+    if (rec.wasRecording !== recording) {
+        rec.wasRecording = recording;
+        loadSessions();
+    }
+}
+
+
+async function loadSessions() {
+
+    let data;
+
+    try {
+        data = await apiGet("/api/record/sessions");
+    } catch (error) {
+        return;
+    }
+
+    const sessions = data.sessions || [];
+
+    if (sessions.length === 0) {
+        rec.sessionsBody.innerHTML =
+            `<tr><td colspan="7" class="rec-empty">No sessions yet.</td></tr>`;
+        return;
+    }
+
+    rec.sessionsBody.innerHTML = sessions.map((s) => {
+
+        const leadOffPct = s.sample_count > 0
+            ? Math.round((s.lead_off_samples / s.sample_count) * 100)
+            : 0;
+
+        const actions = s.recording
+            ? `<span class="rec-live-tag">recording…</span>`
+            : `<a class="rec-link" href="${BACKEND_URL}/api/record/sessions/${s.id}/csv">CSV</a>` +
+              `<button class="rec-delete" data-id="${s.id}">Delete</button>`;
+
+        return `
+            <tr>
+                <td>${s.id}</td>
+                <td>${escapeHTML(s.label)}</td>
+                <td class="rec-note" title="${escapeHTML(s.note || "")}">${escapeHTML(s.note || "—")}</td>
+                <td>${formatDuration(s.duration_s)}</td>
+                <td>${s.sample_count}</td>
+                <td class="${leadOffPct > 0 ? "warn" : ""}">${leadOffPct}%</td>
+                <td class="rec-actions">${actions}</td>
+            </tr>`;
+    }).join("");
+}
+
+
+rec.startBtn.addEventListener("click", async () => {
+
+    rec.busy = true;
+    rec.startBtn.disabled = true;
+    showRecMessage("");
+
+    try {
+        await apiPost("/api/record/start", {
+            label: rec.label.value,
+            note: rec.note.value
+        });
+        await pollRecording();
+    } catch (error) {
+        showRecMessage(error.message, true);
+    } finally {
+        rec.busy = false;
+    }
+});
+
+
+rec.stopBtn.addEventListener("click", async () => {
+
+    rec.busy = true;
+    rec.stopBtn.disabled = true;
+
+    try {
+        const result = await apiPost("/api/record/stop", {});
+        const s = result.session;
+        rec.note.value = "";
+        await pollRecording();
+        showRecMessage(
+            `Saved session #${s.id}: ${s.sample_count} samples in ${formatDuration(s.duration_s)}.`
+        );
+    } catch (error) {
+        showRecMessage(error.message, true);
+    } finally {
+        rec.busy = false;
+        rec.stopBtn.disabled = false;
+    }
+});
+
+
+/* Delete needs two clicks (no pop-up): first click arms it, second deletes */
+rec.sessionsBody.addEventListener("click", async (event) => {
+
+    const button = event.target.closest(".rec-delete");
+
+    if (!button) {
+        return;
+    }
+
+    if (!button.classList.contains("confirm")) {
+        button.classList.add("confirm");
+        button.textContent = "Sure?";
+        setTimeout(() => {
+            button.classList.remove("confirm");
+            button.textContent = "Delete";
+        }, 3000);
+        return;
+    }
+
+    try {
+        const response = await fetch(
+            `${BACKEND_URL}/api/record/sessions/${button.dataset.id}`,
+            { method: "DELETE" }
+        );
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            throw new Error(body.error || `Delete failed (${response.status})`);
+        }
+        showRecMessage(`Deleted session #${button.dataset.id}.`);
+    } catch (error) {
+        showRecMessage(error.message, true);
+    }
+
+    loadSessions();
+});
+
+
 async function pollLoop() {
 
     try {
@@ -1076,7 +1308,8 @@ async function pollLoop() {
         await Promise.all([
             pollWaveform(),
             pollMetrics(),
-            pollEnvironment()
+            pollEnvironment(),
+            pollRecording()
         ]);
 
         setConnectionState(true);

@@ -1,9 +1,12 @@
 # Security: Never commit API keys
 backend/.env
+firmware/secrets.h
 
 # Python cache and environments
 __pycache__/
 *.pyc
 venv/
 env/
-firmware/secrets.h
+
+# Recorded plant data (big, personal; export CSVs instead)
+backend/data/
