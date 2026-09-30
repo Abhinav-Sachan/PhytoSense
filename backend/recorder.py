@@ -10,7 +10,14 @@ How it works:
 The database is ONE file: backend/data/phytosense.db (SQLite, built into Python).
 It has two tables:
   sessions : one row per recording (label, note, start/end time, sample count)
-  samples  : one row per sample (time, bio_mv, dc_uv, temp, humidity, light, lead_off)
+  samples  : one row per sample (time, seq, bio_mv, dc_uv, temp, humidity, light, lead_off)
+
+Exact timing: the ESP32 numbers every sample (seq = 0, 1, 2, ... since it
+switched on) and measures exactly 10 per second. So sample number N was
+measured at  anchor + (N + 1) * 0.1 s,  where "anchor" is the moment the
+ESP32 started counting. We estimate the anchor from the batch that arrived
+fastest (Wi-Fi delay only ever makes a batch LATE, never early). A jump in
+seq means samples went missing, and that is counted per session.
 
 dc_uv is empty (NULL) for now. It will hold the ADS1115 slow-channel reading
 once that module is added, so the database never has to change.
@@ -36,6 +43,12 @@ class Recorder:
         self._lock = threading.Lock()   # Flask can call us from several threads at once
         self.active_id = None           # id of the session being recorded, or None
         self.active_started = None      # when that session started (unix time)
+
+        # Device clock (see top of file). Reset whenever the ESP32 restarts.
+        self.clock_anchor = None        # unix time when the ESP32 had seq = 0
+        self.last_seq_seen = None       # newest seq received (recording or not)
+        self.last_uptime = None         # ESP32 uptime in the last batch (drops when it restarts)
+        self.last_saved_seq = None      # newest seq saved in the running session
 
         folder = os.path.dirname(db_path)
         if folder:
@@ -85,6 +98,14 @@ class Recorder:
                 )""")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_samples_session ON samples(session_id)")
 
+            # Columns added in a later version: add them to older databases too
+            sample_cols = [r["name"] for r in conn.execute("PRAGMA table_info(samples)")]
+            if "seq" not in sample_cols:
+                conn.execute("ALTER TABLE samples ADD COLUMN seq INTEGER")
+            session_cols = [r["name"] for r in conn.execute("PRAGMA table_info(sessions)")]
+            if "missing_samples" not in session_cols:
+                conn.execute("ALTER TABLE sessions ADD COLUMN missing_samples INTEGER NOT NULL DEFAULT 0")
+
     def _close_unfinished_sessions(self):
         """If the server was stopped mid-recording, close that session properly
         so it doesn't stay 'recording' forever."""
@@ -111,6 +132,7 @@ class Recorder:
                     (label, (note or "").strip(), started, self.sample_rate))
                 self.active_id = cur.lastrowid
                 self.active_started = started
+                self.last_saved_seq = None
         return self.get_session(self.active_id), None
 
     def stop(self):
@@ -126,32 +148,81 @@ class Recorder:
         return self.get_session(session_id), None
 
     # ---- saving samples --------------------------------------------------
-    def add_batch(self, bio_mv_list, telemetry, dc_uv_list=None):
-        """Called for every batch the ESP32 sends. Does nothing unless recording.
-        The batch covers the last second, so sample i gets a time spread over it."""
+    def _update_clock(self, seq_list, uptime, now):
+        """Keep track of when the ESP32 started counting (see top of file)."""
+        period = 1.0 / self.sample_rate
+        restarted = False
+        if uptime is not None and self.last_uptime is not None and uptime < self.last_uptime - 1:
+            restarted = True     # uptime went backwards -> the ESP32 restarted, seq begins at 0 again
+        elif uptime is None and self.last_seq_seen is not None and seq_list[0] < self.last_seq_seen - 1000:
+            restarted = True     # (no uptime sent) a big jump backwards also means a restart
+        if restarted:
+            self.clock_anchor = None
+            self.last_saved_seq = None
+        # A small step backwards is NOT a restart: the ESP32 re-sent a batch whose
+        # reply got lost. Those samples are skipped below as already saved.
+        if uptime is not None:
+            self.last_uptime = uptime
+        # The newest sample in this batch finished measuring no later than "now"
+        candidate = now - (seq_list[-1] + 1) * period
+        if self.clock_anchor is None or candidate < self.clock_anchor:
+            self.clock_anchor = candidate    # the fastest-arriving batch is the most accurate
+        self.last_seq_seen = max(seq_list[-1], self.last_seq_seen or 0) if not restarted else seq_list[-1]
+
+    def add_batch(self, bio_mv_list, telemetry, dc_uv_list=None, seq_list=None, now=None):
+        """Called for every batch the ESP32 sends. Saves it only while recording.
+
+        With seq_list (firmware v2.1+): exact times from the sample numbers,
+        samples measured before Start are skipped, and gaps are counted.
+        Without seq_list (older firmware): times are spread over the last second.
+        ("now" is only passed in by the self-test below.)"""
         with self._lock:
+            now = time.time() if now is None else now
+            period = 1.0 / self.sample_rate
+            if seq_list is not None:
+                self._update_clock(seq_list, telemetry.get("uptime_s"), now)
+
             if self.active_id is None:
                 return 0
-            now = time.time()
+
             n = len(bio_mv_list)
             lead_off = telemetry.get("lead_off")
+            lead_off_value = None if lead_off is None else int(bool(lead_off))
             rows = []
+            missing = 0
+
             for i, value in enumerate(bio_mv_list):
-                t = now - (n - 1 - i) / self.sample_rate
-                t = max(t, self.active_started)   # never earlier than the Start press
+                seq = None
+                if seq_list is not None:
+                    seq = seq_list[i]
+                    t = self.clock_anchor + (seq + 1) * period
+                    if t < self.active_started:
+                        continue            # measured before Start was pressed -> not part of this session
+                    if self.last_saved_seq is not None:
+                        if seq <= self.last_saved_seq:
+                            continue        # already saved (the ESP32 re-sent a batch)
+                        missing += seq - self.last_saved_seq - 1
+                    self.last_saved_seq = seq
+                else:
+                    t = now - (n - 1 - i) * period
+                    t = max(t, self.active_started)   # never earlier than the Start press
+
                 dc = None
                 if dc_uv_list is not None and i < len(dc_uv_list):
                     dc = dc_uv_list[i]
-                rows.append((self.active_id, t, float(value), dc,
+                rows.append((self.active_id, t, seq, float(value), dc,
                              telemetry.get("temp_c"), telemetry.get("humidity_pct"),
-                             telemetry.get("light_pct"),
-                             None if lead_off is None else int(bool(lead_off))))
+                             telemetry.get("light_pct"), lead_off_value))
+
+            if not rows:
+                return 0
             with self._connect() as conn:
                 conn.executemany(
-                    "INSERT INTO samples (session_id, t, bio_mv, dc_uv, temp_c, humidity_pct, light_pct, lead_off) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
-                conn.execute("UPDATE sessions SET sample_count = sample_count + ? WHERE id = ?",
-                             (len(rows), self.active_id))
+                    "INSERT INTO samples (session_id, t, seq, bio_mv, dc_uv, temp_c, humidity_pct, light_pct, lead_off) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+                conn.execute("UPDATE sessions SET sample_count = sample_count + ?, "
+                             "missing_samples = missing_samples + ? WHERE id = ?",
+                             (len(rows), missing, self.active_id))
             return len(rows)
 
     # ---- reading back ----------------------------------------------------
@@ -188,11 +259,11 @@ class Recorder:
             return None
         out = io.StringIO()
         writer = csv.writer(out)
-        writer.writerow(["session_id", "label", "t_unix", "t_rel_s", "bio_mv", "dc_uv",
+        writer.writerow(["session_id", "label", "seq", "t_unix", "t_rel_s", "bio_mv", "dc_uv",
                          "temp_c", "humidity_pct", "light_pct", "lead_off"])
         with self._connect() as conn:
-            for r in conn.execute("SELECT * FROM samples WHERE session_id = ? ORDER BY t", (session_id,)):
-                writer.writerow([session_id, session["label"], round(r["t"], 3),
+            for r in conn.execute("SELECT * FROM samples WHERE session_id = ? ORDER BY t, id", (session_id,)):
+                writer.writerow([session_id, session["label"], r["seq"], round(r["t"], 3),
                                  round(r["t"] - session["started_at"], 3), r["bio_mv"], r["dc_uv"],
                                  r["temp_c"], r["humidity_pct"], r["light_pct"], r["lead_off"]])
         return out.getvalue()
@@ -247,5 +318,29 @@ if __name__ == "__main__":
     ok, _ = rec.delete_session(session["id"])
     print("9. Deleted:", ok, "- sessions left:", len(rec.list_sessions()))
 
+    # Exact timing with sample numbers (firmware v2.1): seq 0..9, then 10..19,
+    # then a batch with 5 missing samples (seq 25..34) that arrives late.
+    t0 = time.time()
+    fake_telemetry = dict(fake_telemetry, uptime_s=100.0)
+    rec.add_batch([1.0] * 10, fake_telemetry, seq_list=list(range(0, 10)), now=t0)   # before Start: skipped
+    session, _ = rec.start("test", "seq test")
+    rec.add_batch([2.0] * 10, fake_telemetry, seq_list=list(range(10, 20)), now=t0 + 1.05)
+    rec.add_batch([3.0] * 10, fake_telemetry, seq_list=list(range(25, 35)), now=t0 + 2.9)   # late + 5 missing
+    rec.add_batch([3.0] * 10, fake_telemetry, seq_list=list(range(25, 35)), now=t0 + 3.0)   # duplicate: ignored
+    session, _ = rec.stop()
+    rows = rec.export_csv(session["id"]).strip().splitlines()[1:]
+    steps = {round(float(b.split(",")[4]) - float(a.split(",")[4]), 3) for a, b in zip(rows, rows[1:])}
+    print("10. With sample numbers: saved", session["sample_count"], "(expected 20), missing",
+          session["missing_samples"], "(expected 5), time steps", sorted(steps), "(expected [0.1, 0.6])")
+
+    # ESP32 restart during a session: uptime drops and seq starts again from 0
+    session, _ = rec.start("test", "restart test")
+    t1 = time.time()
+    rec.add_batch([1.0] * 10, dict(fake_telemetry, uptime_s=501.0), seq_list=list(range(5000, 5010)), now=t1 + 1.0)
+    rec.add_batch([1.0] * 10, dict(fake_telemetry, uptime_s=1.0), seq_list=list(range(0, 10)), now=t1 + 2.5)
+    session, _ = rec.stop()
+    print("11. After an ESP32 restart: saved", session["sample_count"], "(expected 20), missing",
+          session["missing_samples"], "(expected 0)")
+
     os.remove(test_db)
-    print("\nSelf-test finished. If all 9 lines look right, recorder.py works!")
+    print("\nSelf-test finished. If all 11 lines look right, recorder.py works!")

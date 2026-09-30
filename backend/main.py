@@ -67,8 +67,14 @@ def ingest():
     if not isinstance(dc_uv, list):
         dc_uv = None
 
+    # Sample numbers from firmware v2.1+ (give every sample its exact time)
+    seq = data.get("seq")
+    if not (isinstance(seq, list) and len(seq) == len(samples)
+            and all(isinstance(x, int) for x in seq)):
+        seq = None
+
     DEVICE.push(samples, telemetry)
-    saved = RECORDER.add_batch(samples, telemetry, dc_uv)   # saves only while a recording is running
+    saved = RECORDER.add_batch(samples, telemetry, dc_uv, seq)   # saves only while a recording is running
     return jsonify({"ok": True, "received": len(samples), "recorded": saved})
 
 
