@@ -228,6 +228,7 @@ h1, h2, h3 { font-family: var(--font-ui); }
 .spectrum-panel { grid-column: 1; grid-row: 2; }
 .log-panel { grid-column: 2; grid-row: 3; }
 .record-panel { grid-column: 1; grid-row: 3; }
+.dc-panel { grid-column: 1 / 3; grid-row: 4; }
 
 .panel-header {
   display: flex;
@@ -274,6 +275,18 @@ h1, h2, h3 { font-family: var(--font-ui); }
 .log-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .log-table th { text-align: left; color: var(--text-faint); font-weight: 500; padding: 6px 4px; border-bottom: 1px solid var(--border-soft); position: sticky; top: 0; background: var(--panel); }
 .log-table td { padding: 7px 4px; font-family: var(--font-mono); color: var(--text-muted); border-bottom: 1px solid var(--border-soft); }
+
+/* ==========================================================================
+   Slow DC channel panel (ADS1115)
+   ========================================================================== */
+
+.dc-readout { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin-bottom: 10px; }
+.dc-readout .readout-value { font-size: 22px; }
+.dc-note { font-size: 12.5px; color: var(--text-muted); }
+.dc-note.warn { color: var(--accent-amber); }
+.dc-chart-wrap { height: 200px; }
+.rec-badge[data-state="live"] { color: var(--bg); background: var(--trace-green); border-color: var(--trace-green); }
+.rec-badge[data-state="warn"] { color: var(--bg); background: var(--accent-amber); border-color: var(--accent-amber); }
 
 /* ==========================================================================
    Recording panel
@@ -451,6 +464,7 @@ h1, h2, h3 { font-family: var(--font-ui); }
   .spectrum-panel { grid-column: 1; grid-row: 3; }
   .log-panel { grid-column: 1; grid-row: 4; }
   .record-panel { grid-column: 1; grid-row: 5; }
+  .dc-panel { grid-column: 1; grid-row: 6; }
   .rec-controls { grid-template-columns: 1fr; }
 
   .ai-grid { grid-template-columns: 1fr; }

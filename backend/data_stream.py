@@ -51,14 +51,28 @@ class IngestBuffer:
         self.last_seen = 0.0    # unix time of the last batch received
         self.latest_telemetry = {}
 
-    def push(self, bio_mv_list, telemetry: dict):
+        # Slow DC channel (ADS1115): keep the last 5 minutes, 10 values per second
+        self.expected_rate = expected_rate
+        self.dc_max_len = 300 * expected_rate
+        self._dc = []           # microvolts (None where the ESP32 had no value), oldest first
+
+    def push(self, bio_mv_list, telemetry: dict, dc_uv_list=None):
         now = time.time()
         with self._lock:
             self._bio.extend(bio_mv_list)
             if len(self._bio) > self.max_len:
                 self._bio = self._bio[-self.max_len:]
+            if dc_uv_list is not None:
+                self._dc.extend(dc_uv_list)
+                if len(self._dc) > self.dc_max_len:
+                    self._dc = self._dc[-self.dc_max_len:]
             self.last_seen = now
             self.latest_telemetry = telemetry
+
+    def get_dc_window(self):
+        """Slow-channel values of the last 5 minutes (microvolts, oldest first)."""
+        with self._lock:
+            return list(self._dc)
 
     def get_latest_window(self):
         with self._lock:

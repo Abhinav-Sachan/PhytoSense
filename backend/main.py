@@ -61,6 +61,7 @@ def ingest():
         "lead_off": data.get("lead_off"),
         "rssi": data.get("rssi"),
         "uptime_s": data.get("uptime_s"),
+        "ads1115": data.get("ads1115"),    # True when firmware found the ADS1115
     }
     # Optional slow DC channel from the ADS1115 (not fitted yet -> usually missing)
     dc_uv = data.get("dc_uv")
@@ -73,7 +74,7 @@ def ingest():
             and all(isinstance(x, int) for x in seq)):
         seq = None
 
-    DEVICE.push(samples, telemetry)
+    DEVICE.push(samples, telemetry, dc_uv)
     saved = RECORDER.add_batch(samples, telemetry, dc_uv, seq)   # saves only while a recording is running
     return jsonify({"ok": True, "received": len(samples), "recorded": saved})
 
@@ -85,6 +86,28 @@ def device_status():
         "telemetry": DEVICE.latest_telemetry,
         "source": get_raw_window()[1],
     })
+
+
+@app.route('/api/dc', methods=['GET'])
+def get_dc():
+    """Slow DC channel (ADS1115, electrodes on A0/A1) for the dashboard chart.
+    Returns 1-second averages of the last 5 minutes, in millivolts."""
+    online = DEVICE.is_online()
+    ads = bool(online and DEVICE.latest_telemetry.get("ads1115"))
+    values = DEVICE.get_dc_window() if ads else []
+    rate = DEVICE_RATE
+    points = []   # [seconds ago (negative), average mV]
+    for start in range(0, len(values) - rate + 1, rate):
+        chunk = [v for v in values[start:start + rate] if v is not None]
+        if chunk:
+            seconds_ago = -(len(values) - start - rate) / rate
+            points.append([round(seconds_ago, 1), round(sum(chunk) / len(chunk) / 1000.0, 4)])
+    latest = points[-1][1] if points else None
+    # The ADS1115 range is +/-256 mV: readings stuck at the edge mean the inputs are
+    # floating (no electrodes) or the plant is outside the range (needs a reference)
+    saturated = latest is not None and abs(latest) > 250.0
+    return jsonify({"online": online, "ads1115": ads, "points": points,
+                    "latest_mv": latest, "saturated": saturated})
 
 
 @app.route('/api/waveform', methods=['GET'])

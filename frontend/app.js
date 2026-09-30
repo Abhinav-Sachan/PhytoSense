@@ -1076,6 +1076,100 @@ async function pollEnvironment() {
 
 
 /* ============================================================
+   SLOW DC CHANNEL (ADS1115)
+   ============================================================ */
+
+const dc = {
+    badge: document.getElementById("dcBadge"),
+    value: document.getElementById("dcValue"),
+    note: document.getElementById("dcNote"),
+    chart: new Chart(
+        document.getElementById("dcChart"),
+        {
+            type: "line",
+            data: {
+                labels: [],
+                datasets: [{
+                    label: "DC (mV)",
+                    data: [],
+                    borderColor: CHART_GREEN,
+                    borderWidth: 1.5,
+                    pointRadius: 0,
+                    tension: 0.2
+                }]
+            },
+            options: {
+                animation: false,
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { display: false }, tooltip: { enabled: false } },
+                scales: {
+                    x: {
+                        grid: { color: GRID_COLOR },
+                        ticks: { color: TICK_COLOR, maxTicksLimit: 7 },
+                        title: { display: true, text: "seconds ago", color: TICK_COLOR }
+                    },
+                    y: {
+                        grid: { color: GRID_COLOR },
+                        ticks: { color: TICK_COLOR },
+                        title: { display: true, text: "mV", color: TICK_COLOR }
+                    }
+                }
+            }
+        }
+    )
+};
+
+
+function setDcBadge(state, text) {
+    dc.badge.dataset.state = state;
+    dc.badge.textContent = text;
+}
+
+
+async function pollDc() {
+
+    const data = await apiGet("/api/dc");
+    const points = data.points || [];
+
+    dc.chart.data.labels = points.map((p) => p[0]);
+    dc.chart.data.datasets[0].data = points.map((p) => p[1]);
+    dc.chart.update("none");
+
+    if (!data.online) {
+        setDcBadge("idle", "ESP32 offline");
+        dc.value.textContent = "\u2014";
+        dc.note.textContent = "Waiting for the ESP32.";
+        dc.note.classList.remove("warn");
+        return;
+    }
+
+    if (!data.ads1115) {
+        setDcBadge("idle", "Waiting for ADS1115");
+        dc.value.textContent = "\u2014";
+        dc.note.textContent =
+            "No ADS1115 found. Connect it (SDA\u2192D21, SCL\u2192D22, VDD\u21923V3, GND, ADDR\u2192GND) and restart the ESP32.";
+        dc.note.classList.remove("warn");
+        return;
+    }
+
+    dc.value.textContent =
+        data.latest_mv === null ? "\u2014" : `${data.latest_mv.toFixed(3)} mV`;
+
+    if (data.saturated) {
+        setDcBadge("warn", "ADS1115: out of range");
+        dc.note.textContent =
+            "Reading is at the \u00b1256 mV limit: electrodes not attached to A0/A1, or the plant needs a reference electrode.";
+        dc.note.classList.add("warn");
+    } else {
+        setDcBadge("live", "ADS1115: live");
+        dc.note.textContent = "1-second averages, last 5 minutes.";
+        dc.note.classList.remove("warn");
+    }
+}
+
+
+/* ============================================================
    RECORDING (labelled sessions for training the model)
    ============================================================ */
 
@@ -1309,7 +1403,8 @@ async function pollLoop() {
             pollWaveform(),
             pollMetrics(),
             pollEnvironment(),
-            pollRecording()
+            pollRecording(),
+            pollDc()
         ]);
 
         setConnectionState(true);

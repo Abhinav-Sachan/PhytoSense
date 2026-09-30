@@ -183,6 +183,20 @@
         </div>
       </section>
 
+      <!-- Slow DC channel: ADS1115 reading the electrodes on A0/A1 -->
+      <section class="panel dc-panel">
+        <div class="panel-header">
+          <h2>Slow channel (DC) &middot; ADS1115</h2>
+          <span class="rec-badge" id="dcBadge" data-state="idle">Waiting for ADS1115</span>
+        </div>
+        <div class="dc-readout">
+          <span class="readout-label">Electrode voltage (A0 &minus; A1)</span>
+          <span class="readout-value" id="dcValue">&mdash;</span>
+          <span class="dc-note" id="dcNote">Connect the ADS1115 (SDA&rarr;D21, SCL&rarr;D22) and restart the ESP32.</span>
+        </div>
+        <div class="chart-wrap dc-chart-wrap"><canvas id="dcChart"></canvas></div>
+      </section>
+
       <!-- Recording: saves labelled sessions for training the model -->
       <section class="panel record-panel">
         <div class="panel-header">
