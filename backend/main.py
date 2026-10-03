@@ -1,4 +1,5 @@
 import os
+import re
 from flask import Flask, jsonify, request, Response
 from flask_cors import CORS
 from data_stream import SensorStream, IngestBuffer
@@ -22,7 +23,29 @@ SIM_STREAM = SensorStream(sample_rate=SIM_RATE)                    # only used w
 DEVICE = IngestBuffer(max_seconds=20, expected_rate=DEVICE_RATE)   # fills up once your ESP32 talks to us
 DEVICE_TOKEN = os.getenv("DEVICE_TOKEN", "phytosense-dev-token")
 
-RECORDER = Recorder(sample_rate=DEVICE_RATE)                      # saves labelled sessions to backend/data/phytosense.db
+# ---- Where recordings are saved --------------------------------------------
+# Everything is kept OUTSIDE the project folder, on the D: drive:
+#   D:\PhytoSense_data\phytosense.db   <- the database (all sessions)
+#   D:\PhytoSense_data\csv\            <- one CSV per session, saved automatically on Stop
+# Two reasons: C: is full, and VS Code Live Server reloads the dashboard every time a
+# file inside the project changes (the database changes every second while recording).
+# If there is no D: drive (other computer), it falls back to backend/data/.
+# You can also choose a folder yourself:  $env:PHYTOSENSE_DATA_DIR="E:\somewhere"
+def pick_data_dir():
+    chosen = os.getenv("PHYTOSENSE_DATA_DIR")
+    if chosen:
+        return chosen
+    if os.name == "nt" and os.path.isdir("D:\\"):
+        return "D:\\PhytoSense_data"
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+
+
+DATA_DIR = pick_data_dir()
+CSV_DIR = os.path.join(DATA_DIR, "csv")
+os.makedirs(CSV_DIR, exist_ok=True)
+print(f"[PhytoSense] Saving recordings in: {DATA_DIR}")
+
+RECORDER = Recorder(db_path=os.path.join(DATA_DIR, "phytosense.db"), sample_rate=DEVICE_RATE)
 
 dsp = BioSignalDSP()
 classifier = PlantClassifier(sample_rate=SIM_RATE)
@@ -159,12 +182,39 @@ def record_start():
     return jsonify({"ok": True, "session": session})
 
 
+def csv_filename(session):
+    """e.g. phytosense_session12_mechanical_pinch-3.csv"""
+    name = f"phytosense_session{session['id']}_{session['label']}"
+    note = re.sub(r"[^A-Za-z0-9]+", "-", session.get("note") or "").strip("-")[:40]
+    if note:
+        name += "_" + note
+    return name + ".csv"
+
+
+def save_csv_to_disk(session_id):
+    """Writes the session's CSV into CSV_DIR. Returns the full path, or None."""
+    session = RECORDER.get_session(session_id)
+    csv_text = RECORDER.export_csv(session_id)
+    if session is None or csv_text is None:
+        return None
+    path = os.path.join(CSV_DIR, csv_filename(session))
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        f.write(csv_text)
+    return path
+
+
 @app.route('/api/record/stop', methods=['POST'])
 def record_stop():
     session, error = RECORDER.stop()
     if error:
         return jsonify({"error": error}), 400
-    return jsonify({"ok": True, "session": session})
+    try:
+        saved_path = save_csv_to_disk(session["id"])
+        print(f"[PhytoSense] CSV saved: {saved_path}")
+    except Exception as e:   # recording is safe in the database even if this fails
+        saved_path = None
+        print(f"[PhytoSense] Could not save CSV file: {e}")
+    return jsonify({"ok": True, "session": session, "csv_path": saved_path})
 
 
 @app.route('/api/record/sessions', methods=['GET'])
@@ -178,7 +228,7 @@ def record_export(session_id):
     if csv_text is None:
         return jsonify({"error": "session not found"}), 404
     session = RECORDER.get_session(session_id)
-    filename = f"phytosense_session{session_id}_{session['label']}.csv"
+    filename = csv_filename(session)
     return Response(csv_text, mimetype="text/csv",
                     headers={"Content-Disposition": f"attachment; filename={filename}"})
 
