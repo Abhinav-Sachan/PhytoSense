@@ -1,6 +1,13 @@
 /*
-  PhytoSense ESP32 firmware  (v2.2: soil moisture sensor + second plant on A2-A3)
+  PhytoSense ESP32 firmware  (v2.3: status LEDs + soil moisture sensor + second plant on A2-A3)
   Pin map matches the ACTUAL wiring on the breadboard (checked 04-10-2026).
+
+  NEW in v2.3 - two status LEDs for the enclosure (no resistors needed: the pins are
+  set to their weakest drive strength, which limits the LED current):
+    POWER LED (green): long leg -> D19, short leg -> D18.  ON = firmware running.
+    WIFI  LED (blue) : long leg -> D4,  short leg -> RX2.  ON = data reaching the laptop,
+                       slow blink = Wi-Fi OK but laptop server not answering, OFF = no Wi-Fi.
+    (D18 and RX2 are set LOW so they act as the LEDs' ground.)
 
   NEW in v2.2
     - Soil moisture sensor (resistive, HW-080 fork + HW-103 board):
@@ -42,6 +49,7 @@
 #include <Wire.h>
 #include <DHT.h>
 #include <Adafruit_ADS1X15.h>
+#include "driver/gpio.h"
 #include "secrets.h"
 
 // ---- Pins (actual breadboard wiring) ------------------------------------
@@ -55,6 +63,10 @@
 #define PIN_SOIL_AO    36   // VP  - soil sensor AO, analog (ADC1_CH0)
 #define PIN_SOIL_VCC   26   // D26 - soil sensor VCC: HIGH only while measuring
 #define PIN_SOIL_GND   25   // D25 - soil sensor GND: always LOW (acts as ground)
+#define PIN_LED_PWR    19   // D19 - POWER LED long leg (+)
+#define PIN_LED_PWR_GND 18  // D18 - POWER LED short leg (-), always LOW
+#define PIN_LED_WIFI    4   // D4  - WIFI LED long leg (+)
+#define PIN_LED_WIFI_GND 16 // RX2 (GPIO16) - WIFI LED short leg (-), always LOW
 // AD8232 SDN is not connected: the SparkFun board then stays switched on.
 // Never set LO+/LO- pins as OUTPUT - they are outputs of the AD8232.
 
@@ -102,6 +114,30 @@ volatile unsigned long droppedSamples = 0;   // only grows if Wi-Fi is down > 30
 
 Sample pending[MAX_SAMPLES_PER_POST];   // samples taken out of the queue, not yet sent
 int pendingCount = 0;
+
+int lastPostCode = 0;          // result of the newest POST, for the WIFI LED
+
+// ---- Status LEDs ----------------------------------------------------------
+void ledPin(int pin, bool on) {
+  pinMode(pin, OUTPUT);
+  gpio_set_drive_capability((gpio_num_t)pin, GPIO_DRIVE_CAP_0);   // weakest drive = small LED current
+  digitalWrite(pin, on ? HIGH : LOW);
+}
+
+void setupLeds() {
+  ledPin(PIN_LED_PWR_GND, false);
+  ledPin(PIN_LED_WIFI_GND, false);
+  ledPin(PIN_LED_PWR, true);      // POWER LED on as soon as the firmware runs
+  ledPin(PIN_LED_WIFI, false);
+}
+
+void updateWifiLed() {
+  bool on;
+  if (WiFi.status() != WL_CONNECTED) on = false;                 // no Wi-Fi: off
+  else if (lastPostCode == 200)      on = true;                  // all good: steady on
+  else                               on = (millis() / 500) % 2;  // Wi-Fi but no server: blink
+  digitalWrite(PIN_LED_WIFI, on ? HIGH : LOW);
+}
 
 unsigned long lastDhtTime = 0;
 float lastTempC = NAN;
@@ -310,7 +346,7 @@ String buildJson() {
   body += ",\"ads1115\":" + String(adsFound ? "true" : "false");
   body += ",\"rssi\":" + String((int)WiFi.RSSI());
   body += ",\"uptime_s\":" + String(millis() / 1000.0, 1);
-  body += ",\"fw\":\"2.2\"";
+  body += ",\"fw\":\"2.3\"";
   body += "}";
   return body;
 }
@@ -355,7 +391,8 @@ void printResult(int code, int sent) {
 void setup() {
   Serial.begin(115200);
   delay(500);
-  Serial.println("\n=== PhytoSense v2.2 starting ===");
+  Serial.println("\n=== PhytoSense v2.3 starting ===");
+  setupLeds();
 
   pinMode(PIN_AD8232_LOM, INPUT);
   pinMode(PIN_AD8232_LOP, INPUT);
@@ -377,6 +414,7 @@ void setup() {
 }
 
 void loop() {
+  updateWifiLed();
   if (WiFi.status() != WL_CONNECTED) {
     if (!connectWiFi()) {
       delay(5000);   // the sampler keeps measuring meanwhile; samples wait in the queue
@@ -399,6 +437,7 @@ void loop() {
 
   int sent = pendingCount;
   int code = sendPending();
+  lastPostCode = code;
   printResult(code, sent);
 
   if (code == 200 || code == 400 || code == 401) {
