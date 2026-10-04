@@ -30,6 +30,10 @@ What the team found out (be open about this, it is a real scientific result):
   (minutes to days); that is why the next experiment tracks drought over several days,
   using the soil moisture sensor as the reference.
 
+You also receive a monitoring timeline that the system keeps by itself (when monitoring
+started, disturbances, soil/temperature/light changes, trends). Use it to answer questions
+about what happened over time, e.g. "what happened in the last hour?".
+
 Limits you must respect:
 - It can NOT diagnose disease, nutrients or water stress yet; the drought model is being built.
 - Never invent readings. Only use the numbers given below. Never call a result a
@@ -87,6 +91,9 @@ def describe(ctx):
         parts.append(f"light {env['light_pct']:.0f} %")
     if parts:
         lines.append("Room: " + ", ".join(parts))
+    if ctx.get("monitor_text"):
+        lines.append("")
+        lines.append(ctx["monitor_text"])
     return "\n".join(lines)
 
 

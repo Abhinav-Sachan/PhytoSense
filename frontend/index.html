@@ -7,7 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css" />
+<link rel="stylesheet" href="style.css?v=11c" />
 </head>
 <body>
 
@@ -276,6 +276,17 @@
           <h2>Current status</h2>
           <button class="btn-primary small" id="runDiagnosisBtn">Analyze now</button>
         </div>
+
+        <!-- Live monitoring: updates by itself, never pops up, no AI call -->
+        <div class="monitor-box" id="monitorBox" data-on="false">
+          <div class="monitor-head">
+            <span class="monitor-dot"></span>
+            <span id="monitorTitle">Not monitoring</span>
+            <button class="btn-secondary small monitor-btn" id="monitorBtn">Start Monitoring</button>
+          </div>
+          <div class="monitor-facts" id="monitorFacts">Put the electrodes on the plant, then press Start Monitoring.</div>
+          <ul class="monitor-timeline" id="monitorTimeline"></ul>
+        </div>
         <div class="status-body" id="statusBody">
           <p class="status-placeholder">Run an analysis to get a plain-language
           read on the plant's current condition, generated from the live
@@ -303,7 +314,7 @@
   </section>
 
   <script src="chart.umd.min.js"></script>
-  <script src="app.js"></script>
+  <script src="app.js?v=11c"></script>
 
 </body>
 </html>

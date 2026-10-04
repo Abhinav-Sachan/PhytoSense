@@ -1043,6 +1043,88 @@ async function pollEnvironment() {
 
 
 /* ============================================================
+   LIVE MONITORING (AI Assistant page) - updates by itself, no AI call
+   ============================================================ */
+
+const mon = {
+    box: document.getElementById("monitorBox"),
+    title: document.getElementById("monitorTitle"),
+    facts: document.getElementById("monitorFacts"),
+    timeline: document.getElementById("monitorTimeline"),
+    btn: document.getElementById("monitorBtn"),
+    on: false
+};
+
+
+mon.btn.addEventListener("click", async () => {
+    const stopping = mon.on;                         // what the button shows right now
+    mon.btn.disabled = true;
+    mon.btn.textContent = stopping ? "Stopping\u2026" : "Starting\u2026";
+    try {
+        const result = await apiPost(stopping ? "/api/monitor/stop" : "/api/monitor/start", {});
+        renderMonitor(result.monitor);               // show the new state immediately
+    } catch (error) {
+        const old = /404|405/.test(error.message);
+        mon.facts.textContent = old
+            ? "The server is still running the old version. Stop Flask (Ctrl+C) and start it again: python main.py"
+            : error.message;
+        mon.errorUntil = Date.now() + 8000;          // keep the message visible for a few seconds
+        mon.btn.textContent = stopping ? "Stop Monitoring" : "Start Monitoring";
+    } finally {
+        mon.btn.disabled = false;
+        mon.btn.textContent = mon.on ? "Stop Monitoring" : "Start Monitoring";
+    }
+});
+
+
+function trendText(t, unit, decimals) {
+    if (!t) return null;
+    const a = Number(t.from).toFixed(decimals), b = Number(t.to).toFixed(decimals);
+    return a === b ? `steady at ${b}${unit}` : `${a}${unit} \u2192 ${b}${unit} (last ${t.minutes} min)`;
+}
+
+
+async function pollMonitor() {
+    if (mon.btn.disabled) return;                    // a Start/Stop click is in progress
+    const data = await apiGet("/api/monitor");
+    if (data) renderMonitor(data);
+}
+
+
+function renderMonitor(data) {
+    if (!data) return;
+
+    mon.box.dataset.on = data.monitoring ? "true" : "false";
+    mon.on = !!data.monitoring;
+    if (!mon.btn.disabled) {
+        mon.btn.textContent = data.monitoring ? "Stop Monitoring" : "Start Monitoring";
+    }
+
+    if (!data.backend_version && !(mon.errorUntil && Date.now() < mon.errorUntil)) {
+        mon.facts.textContent = "The server is still running the old version. Stop Flask (Ctrl+C) and start it again: python main.py";
+        return;
+    }
+
+    if (data.monitoring) {
+        mon.title.textContent = `Monitoring since ${data.since_clock} \u00b7 ${data.duration}`;
+        const facts = [`${data.disturbances} disturbance${data.disturbances === 1 ? "" : "s"}`];
+        const soil = trendText(data.trends.soil, " %", 0);
+        const temp = trendText(data.trends.temp, " \u00b0C", 1);
+        if (soil) facts.push(`soil ${soil}`);
+        if (temp) facts.push(`temperature ${temp}`);
+        mon.facts.textContent = facts.join(" \u00b7 ");
+    } else if (!(mon.errorUntil && Date.now() < mon.errorUntil)) {
+        mon.title.textContent = "Not monitoring";
+        mon.facts.textContent = "Put the electrodes on the plant, then press Start Monitoring.";
+    }
+
+    mon.timeline.innerHTML = (data.timeline || []).slice(0, 8).map((e) =>
+        `<li data-kind="${escapeHTML(e.kind)}"><span>${escapeHTML(e.clock)}</span>${escapeHTML(e.text)}</li>`
+    ).join("");
+}
+
+
+/* ============================================================
    SOIL MOISTURE (resistive sensor, firmware v2.2)
    ============================================================ */
 
@@ -1406,6 +1488,7 @@ async function pollLoop() {
             pollMetrics(),
             pollState(),
             pollSoil(),
+            pollMonitor(),
             pollEnvironment(),
             pollRecording(),
             pollDc()

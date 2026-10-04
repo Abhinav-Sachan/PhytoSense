@@ -516,3 +516,17 @@ h1, h2, h3 { font-family: var(--font-ui); }
 @media (prefers-reduced-motion: reduce) {
   * { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
 }
+
+/* Live monitoring box (AI Assistant page) */
+.monitor-box { margin: 4px 0 16px; padding: 12px 14px; border: 1px solid var(--border); border-left: 3px solid var(--text-faint); border-radius: var(--radius-md); background: var(--panel-alt); }
+.monitor-box[data-on="true"] { border-left-color: var(--trace-green); }
+.monitor-head { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--text-primary); }
+.monitor-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-faint); flex: none; }
+.monitor-box[data-on="true"] .monitor-dot { background: var(--trace-green); box-shadow: 0 0 6px 1px var(--trace-green-dim); animation: state-pulse 2s ease-in-out infinite; }
+.monitor-facts { margin-top: 6px; font-size: 12px; line-height: 1.5; color: var(--text-muted); }
+.monitor-timeline { list-style: none; margin: 10px 0 0; padding: 0; max-height: 170px; overflow-y: auto; }
+.monitor-timeline li { display: flex; gap: 10px; padding: 5px 0; border-top: 1px solid var(--border-soft); font-size: 11.5px; color: var(--text-muted); }
+.monitor-timeline li span { font-family: var(--font-mono); color: var(--text-faint); flex: none; }
+.monitor-timeline li[data-kind="disturbance"] { color: #e07a64; }
+.monitor-timeline li[data-kind="start"] { color: var(--trace-green); }
+.monitor-btn { margin-left: auto; padding: 4px 10px; font-size: 11.5px; white-space: nowrap; }

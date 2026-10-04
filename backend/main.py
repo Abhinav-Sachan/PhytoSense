@@ -8,6 +8,7 @@ from data_stream import SensorStream, IngestBuffer
 from dsp_filters import BioSignalDSP
 from ai_engine import SignalFeatures
 from detector import LiveDetector
+from monitor import PlantMonitor
 from llm_service import PlantLLM
 from recorder import Recorder
 
@@ -80,6 +81,13 @@ else:
 
 latest_fast = {}   # newest fast-channel numbers, for the AI assistant
 
+# Background plant monitor: started with the "Start monitoring" button, keeps a
+# timeline for the AI assistant. Never shows pop-ups and never calls the AI on its own.
+MONITOR = PlantMonitor()
+_last_monitor_update = 0.0
+BACKEND_VERSION = "11c"
+print(f"[PhytoSense] Backend version {BACKEND_VERSION} (AI monitor with Start/Stop button)")
+
 
 def get_raw_window():
     """Returns (samples, source, sample_rate).
@@ -147,6 +155,16 @@ def ingest():
         DETECTOR.push(dc_for_detector, seq)                        # live plant-event detection
     saved = RECORDER.add_batch(samples, telemetry, dc_uv, seq,     # saves only while a recording is running
                                dc2_uv_list=dc2_uv, soil_mv=soil_mv, soil_seq=soil_seq)
+
+    global _last_monitor_update
+    if time.time() - _last_monitor_update >= 2.0:                  # update the monitor every 2 s
+        _last_monitor_update = time.time()
+        try:
+            MONITOR.update(plant_state(),
+                           soil_percent(SOIL_HISTORY[-1][1]) if SOIL_HISTORY else None,
+                           telemetry)
+        except Exception as e:                                     # the monitor must never break data intake
+            print(f"[PhytoSense] monitor update failed: {e}")
     return jsonify({"ok": True, "received": len(samples), "recorded": saved})
 
 
@@ -222,6 +240,34 @@ def plant_state():
     else:
         status["display"] = status["state"]
     return status
+
+
+@app.route('/api/monitor', methods=['GET'])
+def get_monitor():
+    """What the background monitor knows: monitoring since when, trends, timeline."""
+    global _last_monitor_update
+    if time.time() - _last_monitor_update > 5.0:     # ESP32 silent: still let the monitor notice
+        _last_monitor_update = time.time()
+        MONITOR.update(plant_state(), None, DEVICE.latest_telemetry)
+    return jsonify(dict(MONITOR.summary(), backend_version=BACKEND_VERSION))
+
+
+@app.route('/api/monitor/start', methods=['POST'])
+def monitor_start():
+    ok, err = MONITOR.start_manual(plant_state(),
+                                   soil_percent(SOIL_HISTORY[-1][1]) if SOIL_HISTORY else None,
+                                   DEVICE.latest_telemetry)
+    if not ok:
+        return jsonify({"error": err}), 409
+    return jsonify({"ok": True, "monitor": dict(MONITOR.summary(), backend_version=BACKEND_VERSION)})
+
+
+@app.route('/api/monitor/stop', methods=['POST'])
+def monitor_stop():
+    ok, err = MONITOR.stop_manual()
+    if not ok:
+        return jsonify({"error": err}), 409
+    return jsonify({"ok": True, "monitor": dict(MONITOR.summary(), backend_version=BACKEND_VERSION)})
 
 
 @app.route('/api/state', methods=['GET'])
@@ -354,6 +400,7 @@ def ai_context():
         "environment": {"temp_c": tel.get("temp_c"), "humidity_pct": tel.get("humidity_pct"),
                         "light_pct": tel.get("light_pct")},
         "fast_channel": {"electrodes_attached": not tel.get("lead_off"), "features": latest_fast or None},
+        "monitor_text": MONITOR.describe(),
         "soil": ({"moisture_pct": soil_percent(SOIL_HISTORY[-1][1]),
                   "age_s": round(time.time() - SOIL_HISTORY[-1][0])} if SOIL_HISTORY else None),
     }
