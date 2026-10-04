@@ -1,6 +1,18 @@
 /*
-  PhytoSense ESP32 firmware  (v2.1: non-stop sampling + sample numbers + ADS1115 ready)
-  Pin map matches the ACTUAL wiring on the breadboard (checked 27-09-2026).
+  PhytoSense ESP32 firmware  (v2.2: soil moisture sensor + second plant on A2-A3)
+  Pin map matches the ACTUAL wiring on the breadboard (checked 04-10-2026).
+
+  NEW in v2.2
+    - Soil moisture sensor (resistive, HW-080 fork + HW-103 board):
+        VCC -> D26, GND -> D25, AO -> VP (GPIO36). DO not used.
+      The sensor is switched ON only for 0.1 s per reading, so the metal prongs
+      do not corrode and the soil is not disturbed most of the time.
+        * first 5 minutes after start: one reading every 5 s  (for calibration)
+        * after that:                  one reading every 60 s (for the experiment)
+      The sample numbers of each reading are sent ("soil_seq"), so the laptop can
+      skip the 0.2 s when the plant signal might be disturbed.
+    - Second plant (plant B) on ADS1115 A2-A3 ("dc2_uv"). Plant A stays on A0-A1.
+      Set PLANT_B_ENABLED to false if only one plant is connected.
 
   How it works - the ESP32 has TWO processor cores, and we use both:
     Core 0  "sampler"  : measures the plant 10 times per second, NON-STOP.
@@ -40,6 +52,9 @@
 #define PIN_DHT        27   // D27 - DHT11 data line
 #define PIN_SDA        21   // D21 - ADS1115 SDA (I2C data)
 #define PIN_SCL        22   // D22 - ADS1115 SCL (I2C clock)
+#define PIN_SOIL_AO    36   // VP  - soil sensor AO, analog (ADC1_CH0)
+#define PIN_SOIL_VCC   26   // D26 - soil sensor VCC: HIGH only while measuring
+#define PIN_SOIL_GND   25   // D25 - soil sensor GND: always LOW (acts as ground)
 // AD8232 SDN is not connected: the SparkFun board then stays switched on.
 // Never set LO+/LO- pins as OUTPUT - they are outputs of the AD8232.
 
@@ -49,13 +64,20 @@ DHT dht(PIN_DHT, DHTTYPE);
 Adafruit_ADS1115 ads;
 const uint8_t ADS_ADDRESS = 0x48;   // ADDR pin connected to GND
 bool adsFound = false;
+const bool PLANT_B_ENABLED = true;  // plant B electrodes on A2 and A3
 
 // ---- Timing -------------------------------------------------------------
 // One sample = average of 100 AD8232 readings taken 1 ms apart = 100 ms.
 // Averaging over exactly 100 ms cancels 50 Hz mains hum (5 full cycles).
 // 10 samples per second, continuously.
 const int READS_PER_SAMPLE = 100;
-const int ADS_EVERY_N_READS = 4;     // ADS1115 runs at 250/s = one new value every 4 ms
+const int ADS_EVERY_N_READS = 5;     // every 5 ms: collect one ADS1115 result, start the next
+                                     // (250/s needs 4 ms per conversion; with 2 plants they take turns)
+// Soil sensor schedule (in samples: 10 samples = 1 second)
+const uint32_t SOIL_FAST_SAMPLES = 50;      // every 5 s ...
+const uint32_t SOIL_FAST_UNTIL   = 3000;    // ... during the first 5 minutes (calibration)
+const uint32_t SOIL_SLOW_SAMPLES = 600;     // then every 60 s
+const int SOIL_SETTLE_READS = 50;           // sensor ON at 0 ms, read from 50 ms to 100 ms
 const unsigned long DHT_READ_MS = 2000;     // DHT11 needs at least 1 s between reads
 const unsigned long WIFI_TIMEOUT_MS = 20000;
 
@@ -68,7 +90,9 @@ const int QUEUE_LENGTH = 300;         // up to 30 s of samples can wait for Wi-F
 struct Sample {
   uint32_t seq;     // sample number since the ESP32 switched on (10 per second)
   float bioMv;      // AD8232 output, millivolts
-  float dcUv;       // ADS1115 A0-A1 difference, microvolts (NAN if no ADS1115)
+  float dcUv;       // ADS1115 A0-A1 difference (plant A), microvolts (NAN if no ADS1115)
+  float dc2Uv;      // ADS1115 A2-A3 difference (plant B), microvolts (NAN if not used)
+  float soilMv;     // soil sensor AO, millivolts (NAN = not measured in this sample)
   float ldrMv;      // LDR divider voltage, millivolts
   bool  leadOff;    // true = an electrode is not touching
 };
@@ -84,26 +108,53 @@ float lastTempC = NAN;
 float lastHumidity = NAN;
 
 // ---- Core 0: the sampler task (runs forever) ----------------------------
+// ADS1115 channel taking turns: 0 = plant A (A0-A1), 1 = plant B (A2-A3)
+int adsChannel = 0;
+bool adsStarted = false;
+
+void startAdsConversion(int channel) {
+  uint16_t mux = (channel == 0) ? ADS1X15_REG_CONFIG_MUX_DIFF_0_1 : ADS1X15_REG_CONFIG_MUX_DIFF_2_3;
+  ads.startADCReading(mux, /*continuous=*/false);
+}
+
 void samplerTask(void *parameter) {
   TickType_t lastWake = xTaskGetTickCount();
   uint32_t nextSeq = 0;
 
   while (true) {
     uint32_t bioSum = 0;
-    float dcSum = 0;
-    int dcCount = 0;
+    float dcSum = 0, dc2Sum = 0;
+    int dcCount = 0, dc2Count = 0;
     bool leadOff = false;
+
+    // Soil reading in this sample?
+    uint32_t soilEvery = (nextSeq < SOIL_FAST_UNTIL) ? SOIL_FAST_SAMPLES : SOIL_SLOW_SAMPLES;
+    bool soilNow = (nextSeq % soilEvery == 0);
+    uint32_t soilSum = 0;
+    int soilCount = 0;
+    if (soilNow) digitalWrite(PIN_SOIL_VCC, HIGH);      // switch the sensor ON
 
     for (int i = 0; i < READS_PER_SAMPLE; i++) {
       vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(1));   // wait for the next 1 ms slot
       bioSum += analogReadMilliVolts(PIN_AD8232_OUT);
 
+      if (soilNow && i >= SOIL_SETTLE_READS) {
+        soilSum += analogReadMilliVolts(PIN_SOIL_AO);
+        soilCount++;
+      }
+
       if (adsFound && (i % ADS_EVERY_N_READS == 0)) {
-        int16_t raw = ads.getLastConversionResults();
-        dcSum += ads.computeVolts(raw) * 1e6f;          // volts -> microvolts
-        dcCount++;
+        if (adsStarted) {                               // result of the conversion started 5 ms ago
+          float uv = ads.computeVolts(ads.getLastConversionResults()) * 1e6f;   // volts -> microvolts
+          if (adsChannel == 0) { dcSum += uv; dcCount++; }
+          else                 { dc2Sum += uv; dc2Count++; }
+        }
+        adsChannel = PLANT_B_ENABLED ? 1 - adsChannel : 0;
+        startAdsConversion(adsChannel);
+        adsStarted = true;
       }
     }
+    if (soilNow) digitalWrite(PIN_SOIL_VCC, LOW);       // switch the sensor OFF again
 
     // Once per sample: electrode check + light level
     leadOff = digitalRead(PIN_AD8232_LOM) == HIGH || digitalRead(PIN_AD8232_LOP) == HIGH;
@@ -112,6 +163,8 @@ void samplerTask(void *parameter) {
     s.seq = nextSeq++;
     s.bioMv = (float)bioSum / READS_PER_SAMPLE;
     s.dcUv = (dcCount > 0) ? dcSum / dcCount : NAN;
+    s.dc2Uv = (dc2Count > 0) ? dc2Sum / dc2Count : NAN;
+    s.soilMv = (soilCount > 0) ? (float)soilSum / soilCount : NAN;
     s.ldrMv = analogReadMilliVolts(PIN_LDR);
     s.leadOff = leadOff;
 
@@ -176,10 +229,10 @@ void setupADS1115() {
   }
 
   ads.setGain(GAIN_SIXTEEN);                 // +/-0.256 V range, 7.8 uV per step
-  ads.setDataRate(RATE_ADS1115_250SPS);      // 250 readings per second
-  ads.startADCReading(ADS1X15_REG_CONFIG_MUX_DIFF_0_1, /*continuous=*/true);  // A0 minus A1
+  ads.setDataRate(RATE_ADS1115_250SPS);      // 4 ms per conversion
   adsFound = true;
-  Serial.println("ADS1115: FOUND at 0x48 -> also sending dc_uv (A0-A1, +/-256 mV range).");
+  Serial.println("ADS1115: FOUND at 0x48 -> sending dc_uv (plant A: A0-A1, +/-256 mV range).");
+  if (PLANT_B_ENABLED) Serial.println("ADS1115: plant B enabled -> also sending dc2_uv (A2-A3).");
 }
 
 // ---- Sensors on core 1 ----------------------------------------------------
@@ -222,6 +275,28 @@ String buildJson() {
       else body += String(pending[i].dcUv, 1);
     }
     body += "]";
+
+    if (PLANT_B_ENABLED) {
+      body += ",\"dc2_uv\":[";
+      for (int i = 0; i < pendingCount; i++) {
+        if (i > 0) body += ",";
+        if (isnan(pending[i].dc2Uv)) body += "null";
+        else body += String(pending[i].dc2Uv, 1);
+      }
+      body += "]";
+    }
+  }
+
+  // Newest soil reading in this batch (if any), with the sample number it was taken in
+  for (int i = pendingCount - 1; i >= 0; i--) {
+    if (!isnan(pending[i].soilMv)) {
+      body += ",\"soil_mv\":" + String(pending[i].soilMv, 0);
+      body += ",\"soil_seq\":" + String(pending[i].seq);
+      Serial.print("Soil sensor: ");
+      Serial.print(pending[i].soilMv, 0);
+      Serial.println(" mV");
+      break;
+    }
   }
 
   bool leadOff = false;
@@ -235,6 +310,7 @@ String buildJson() {
   body += ",\"ads1115\":" + String(adsFound ? "true" : "false");
   body += ",\"rssi\":" + String((int)WiFi.RSSI());
   body += ",\"uptime_s\":" + String(millis() / 1000.0, 1);
+  body += ",\"fw\":\"2.2\"";
   body += "}";
   return body;
 }
@@ -279,10 +355,14 @@ void printResult(int code, int sent) {
 void setup() {
   Serial.begin(115200);
   delay(500);
-  Serial.println("\n=== PhytoSense v2.1 starting ===");
+  Serial.println("\n=== PhytoSense v2.2 starting ===");
 
   pinMode(PIN_AD8232_LOM, INPUT);
   pinMode(PIN_AD8232_LOP, INPUT);
+  pinMode(PIN_SOIL_GND, OUTPUT);
+  digitalWrite(PIN_SOIL_GND, LOW);     // D25 = ground for the soil sensor
+  pinMode(PIN_SOIL_VCC, OUTPUT);
+  digitalWrite(PIN_SOIL_VCC, LOW);     // sensor OFF until a reading is due
   analogReadResolution(12);
   dht.begin();
 

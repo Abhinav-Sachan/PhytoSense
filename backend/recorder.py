@@ -27,11 +27,17 @@ import contextlib
 import csv
 import io
 import os
+import re
 import sqlite3
 import threading
 import time
 
 LABELS = ["baseline", "drought", "mechanical", "test"]
+
+# Long recordings with these labels are cut into 1-hour parts automatically
+# (each part becomes its own session + CSV file, so a 3-day recording is easy to handle)
+AUTO_SPLIT_LABELS = {"drought"}
+AUTO_SPLIT_SECONDS = 3600
 
 DEFAULT_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "phytosense.db")
 
@@ -40,7 +46,9 @@ class Recorder:
     def __init__(self, db_path=DEFAULT_DB_PATH, sample_rate=10):
         self.db_path = db_path
         self.sample_rate = sample_rate
-        self._lock = threading.Lock()   # Flask can call us from several threads at once
+        self._lock = threading.RLock()  # Flask can call us from several threads at once
+        self.on_auto_split = None       # function(session_id) called after a part is finished
+        self.soil_busy_seq = set()      # samples taken while the soil sensor was switched on
         self.active_id = None           # id of the session being recorded, or None
         self.active_started = None      # when that session started (unix time)
 
@@ -105,6 +113,9 @@ class Recorder:
             session_cols = [r["name"] for r in conn.execute("PRAGMA table_info(sessions)")]
             if "missing_samples" not in session_cols:
                 conn.execute("ALTER TABLE sessions ADD COLUMN missing_samples INTEGER NOT NULL DEFAULT 0")
+            for col in ("dc2_uv REAL", "soil_mv REAL", "soil_busy INTEGER"):     # added in v2.2
+                if col.split()[0] not in sample_cols:
+                    conn.execute(f"ALTER TABLE samples ADD COLUMN {col}")
 
     def _close_unfinished_sessions(self):
         """If the server was stopped mid-recording, close that session properly
@@ -117,7 +128,7 @@ class Recorder:
                              (last_t or row["started_at"], row["id"]))
 
     # ---- start / stop ----------------------------------------------------
-    def start(self, label, note=""):
+    def start(self, label, note="", started=None):
         """Begin a new session. Returns (session_dict, error_message)."""
         label = (label or "").strip().lower()
         if label not in LABELS:
@@ -125,7 +136,7 @@ class Recorder:
         with self._lock:
             if self.active_id is not None:
                 return None, "a recording is already running - stop it first"
-            started = time.time()
+            started = time.time() if started is None else started
             with self._connect() as conn:
                 cur = conn.execute(
                     "INSERT INTO sessions (label, note, started_at, sample_rate) VALUES (?, ?, ?, ?)",
@@ -152,8 +163,10 @@ class Recorder:
         """Keep track of when the ESP32 started counting (see top of file)."""
         period = 1.0 / self.sample_rate
         restarted = False
-        if uptime is not None and self.last_uptime is not None and uptime < self.last_uptime - 1:
-            restarted = True     # uptime went backwards -> the ESP32 restarted, seq begins at 0 again
+        if uptime is not None and self.last_uptime is not None and uptime < self.last_uptime - 20:
+            restarted = True     # uptime went far backwards -> the ESP32 restarted, seq begins at 0 again
+            # (a small step back is just a delayed batch arriving late, NOT a restart;
+            #  treating it as a restart used to save some samples twice)
         elif uptime is None and self.last_seq_seen is not None and seq_list[0] < self.last_seq_seen - 1000:
             restarted = True     # (no uptime sent) a big jump backwards also means a restart
         if restarted:
@@ -169,7 +182,26 @@ class Recorder:
             self.clock_anchor = candidate    # the fastest-arriving batch is the most accurate
         self.last_seq_seen = max(seq_list[-1], self.last_seq_seen or 0) if not restarted else seq_list[-1]
 
-    def add_batch(self, bio_mv_list, telemetry, dc_uv_list=None, seq_list=None, now=None):
+    def _auto_split(self, now):
+        """Finish the running part and start the next one with the same label (lock held)."""
+        session = self.get_session(self.active_id)
+        old_id = self.active_id
+        note = re.sub(r"\s*\(part \d+\)$", "", session.get("note") or "")
+        m = re.search(r"\(part (\d+)\)$", session.get("note") or "")
+        part = int(m.group(1)) + 1 if m else 2
+        if not m:   # first part gets its number too
+            with self._connect() as conn:
+                conn.execute("UPDATE sessions SET note = ? WHERE id = ?", (f"{note} (part 1)".strip(), old_id))
+        self.stop()
+        self.start(session["label"], f"{note} (part {part})".strip(), started=now)
+        if self.on_auto_split:
+            try:
+                self.on_auto_split(old_id)
+            except Exception as e:      # saving the CSV must never stop the recording
+                print(f"[recorder] auto-split callback failed: {e}")
+
+    def add_batch(self, bio_mv_list, telemetry, dc_uv_list=None, seq_list=None, now=None,
+                  dc2_uv_list=None, soil_mv=None, soil_seq=None):
         """Called for every batch the ESP32 sends. Saves it only while recording.
 
         With seq_list (firmware v2.1+): exact times from the sample numbers,
@@ -182,8 +214,20 @@ class Recorder:
             if seq_list is not None:
                 self._update_clock(seq_list, telemetry.get("uptime_s"), now)
 
+            # Remember which samples the soil sensor might have disturbed (its sample + the next)
+            if soil_seq is not None:
+                self.soil_busy_seq = {soil_seq, soil_seq + 1}
+
             if self.active_id is None:
                 return 0
+
+            # Long drought recordings: start a new 1-hour part when the current one is full
+            if self._label_of_active() in AUTO_SPLIT_LABELS and now - self.active_started >= AUTO_SPLIT_SECONDS:
+                # the new part starts with the first sample of this batch, so nothing is lost
+                first_t = (self.clock_anchor + (seq_list[0] + 1) * period
+                           if seq_list is not None and self.clock_anchor is not None
+                           else now - len(bio_mv_list) * period)
+                self._auto_split(min(now, first_t - 0.001))
 
             n = len(bio_mv_list)
             lead_off = telemetry.get("lead_off")
@@ -210,20 +254,32 @@ class Recorder:
                 dc = None
                 if dc_uv_list is not None and i < len(dc_uv_list):
                     dc = dc_uv_list[i]
+                dc2 = None
+                if dc2_uv_list is not None and i < len(dc2_uv_list):
+                    dc2 = dc2_uv_list[i]
+                soil = soil_mv if (soil_seq is not None and seq == soil_seq) else None
+                busy = None if seq is None else int(seq in self.soil_busy_seq)
                 rows.append((self.active_id, t, seq, float(value), dc,
                              telemetry.get("temp_c"), telemetry.get("humidity_pct"),
-                             telemetry.get("light_pct"), lead_off_value))
+                             telemetry.get("light_pct"), lead_off_value, dc2, soil, busy))
 
             if not rows:
                 return 0
             with self._connect() as conn:
                 conn.executemany(
-                    "INSERT INTO samples (session_id, t, seq, bio_mv, dc_uv, temp_c, humidity_pct, light_pct, lead_off) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+                    "INSERT INTO samples (session_id, t, seq, bio_mv, dc_uv, temp_c, humidity_pct, light_pct, lead_off, "
+                    "dc2_uv, soil_mv, soil_busy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
                 conn.execute("UPDATE sessions SET sample_count = sample_count + ?, "
                              "missing_samples = missing_samples + ? WHERE id = ?",
                              (len(rows), missing, self.active_id))
             return len(rows)
+
+    def _label_of_active(self):
+        if self.active_id is None:
+            return None
+        with self._connect() as conn:
+            row = conn.execute("SELECT label FROM sessions WHERE id = ?", (self.active_id,)).fetchone()
+        return row["label"] if row else None
 
     # ---- reading back ----------------------------------------------------
     def get_session(self, session_id):
@@ -260,12 +316,14 @@ class Recorder:
         out = io.StringIO()
         writer = csv.writer(out)
         writer.writerow(["session_id", "label", "seq", "t_unix", "t_rel_s", "bio_mv", "dc_uv",
-                         "temp_c", "humidity_pct", "light_pct", "lead_off"])
+                         "temp_c", "humidity_pct", "light_pct", "lead_off",
+                         "dc2_uv", "soil_mv", "soil_busy"])
         with self._connect() as conn:
             for r in conn.execute("SELECT * FROM samples WHERE session_id = ? ORDER BY t, id", (session_id,)):
                 writer.writerow([session_id, session["label"], r["seq"], round(r["t"], 3),
                                  round(r["t"] - session["started_at"], 3), r["bio_mv"], r["dc_uv"],
-                                 r["temp_c"], r["humidity_pct"], r["light_pct"], r["lead_off"]])
+                                 r["temp_c"], r["humidity_pct"], r["light_pct"], r["lead_off"],
+                                 r["dc2_uv"], r["soil_mv"], r["soil_busy"]])
         return out.getvalue()
 
     def delete_session(self, session_id):
@@ -327,6 +385,7 @@ if __name__ == "__main__":
     rec.add_batch([2.0] * 10, fake_telemetry, seq_list=list(range(10, 20)), now=t0 + 1.05)
     rec.add_batch([3.0] * 10, fake_telemetry, seq_list=list(range(25, 35)), now=t0 + 2.9)   # late + 5 missing
     rec.add_batch([3.0] * 10, fake_telemetry, seq_list=list(range(25, 35)), now=t0 + 3.0)   # duplicate: ignored
+    rec.add_batch([2.0] * 10, dict(fake_telemetry, uptime_s=97.0), seq_list=list(range(10, 20)), now=t0 + 3.1)   # late, older uptime: ignored
     session, _ = rec.stop()
     rows = rec.export_csv(session["id"]).strip().splitlines()[1:]
     steps = {round(float(b.split(",")[4]) - float(a.split(",")[4]), 3) for a, b in zip(rows, rows[1:])}

@@ -34,10 +34,10 @@
       <p class="hero-eyebrow">Plant bio-electric monitoring</p>
       <h1>Plants speak in millivolts.<br>PhytoSense listens.</h1>
       <p class="hero-sub">
-        A surface bio-potential sensor, a real-time DSP pipeline, and a
-        trained classifier turn a plant's raw electrical signal into a
-        readable state — then an AI assistant explains what it means and
-        answers questions about it, in plain language.
+        Electrodes on two leaves, a 16-bit converter and a soil-moisture sensor
+        watch a money plant's electrical signal live. A trained detector flags
+        disturbances within seconds, careful control tests show what is really the
+        plant, and an AI assistant explains it all in plain language.
       </p>
       <div class="hero-actions">
         <button class="btn-primary" data-nav="dashboard">Open dashboard</button>
@@ -70,9 +70,11 @@
         </li>
         <li class="step">
           <span class="step-index">3</span>
-          <h3>Classify</h3>
-          <p>Six extracted features feed a Random Forest model that scores
-          the signal against Healthy, Mild Stress, and Water Deficit.</p>
+          <h3>Detect &amp; test</h3>
+          <p>A model trained on 18 labelled recordings flags sudden electrical
+          disturbances live. Control tests (plastic pen, a second amplifier) showed
+          those come mostly from the human body, so we now track slow drought
+          stress with a soil-moisture reference.</p>
         </li>
         <li class="step">
           <span class="step-index">4</span>
@@ -122,12 +124,21 @@
       </section>
 
       <section class="panel readout-panel">
-        <div class="panel-header"><h2>Plant state</h2></div>
-        <div class="classification" id="classification">
-          <div class="classification-label" id="classLabel">—</div>
-          <div class="classification-confidence" id="classConfidence">Awaiting data</div>
+        <div class="panel-header">
+          <h2>Plant state</h2>
+          <span class="rec-badge" data-state="idle">Live detector</span>
         </div>
-        <div class="prob-bars" id="probBars"></div>
+        <div class="plant-state" id="plantState" data-state="offline">
+          <div class="plant-state-label" id="stateLabel">&mdash;</div>
+          <div class="plant-state-sub" id="stateSub">Waiting for ESP32&hellip;</div>
+          <div class="event-meter" title="Event probability (the line is the alarm threshold)">
+            <span class="event-meter-fill" id="stateMeter"></span>
+            <span class="event-meter-mark" id="stateMark"></span>
+          </div>
+          <div class="plant-state-meta" id="stateMeta"></div>
+        </div>
+
+        <h3 class="readout-section-title">Fast channel (AD8232)</h3>
         <div class="readout-grid">
           <div class="readout">
             <span class="readout-label">RMS amplitude</span>
@@ -165,6 +176,15 @@
             <span class="readout-label">Electrodes</span>
             <span class="readout-value" id="valElectrodes">—</span>
           </div>
+          <div class="readout">
+            <span class="readout-label">Soil moisture</span>
+            <span class="readout-value" id="valSoil">—</span>
+            <span class="readout-sub" id="valSoilSub"></span>
+          </div>
+          <div class="readout">
+            <span class="readout-label">Plant B (A2&minus;A3)</span>
+            <span class="readout-value" id="valPlantB">—</span>
+          </div>
         </div>
       </section>
 
@@ -174,13 +194,16 @@
       </section>
 
       <section class="panel log-panel">
-        <div class="panel-header"><h2>Session log</h2></div>
+        <div class="panel-header"><h2>Event log</h2></div>
         <div class="log-table-wrap">
           <table class="log-table">
-            <thead><tr><th>Time</th><th>State</th><th>Confidence</th></tr></thead>
-            <tbody id="logBody"></tbody>
+            <thead><tr><th>Time</th><th>Event</th><th>Change</th><th>Length</th><th>Conf.</th></tr></thead>
+            <tbody id="logBody">
+              <tr><td colspan="5" class="rec-empty">No events yet.</td></tr>
+            </tbody>
           </table>
         </div>
+        <p class="log-note" id="logNote"></p>
       </section>
 
       <!-- Slow DC channel: ADS1115 reading the electrodes on A0/A1 -->
@@ -224,6 +247,8 @@
         </div>
 
         <div class="rec-live" id="recLive">Not recording. Pick a label, add a note, then press Start.</div>
+        <p class="log-note">Label <b>drought</b> = long recording (hours or days). It is saved
+        automatically as 1-hour parts, each with its own CSV file in D:\PhytoSense_data\csv.</p>
         <div class="rec-msg" id="recMsg" hidden></div>
 
         <h3 class="readout-section-title">Saved sessions</h3>
@@ -269,7 +294,7 @@
           </div>
         </div>
         <form class="chat-input-row" id="chatForm">
-          <textarea id="chatInput" placeholder="e.g. Why is the water deficit score rising?" rows="1"></textarea>
+          <textarea id="chatInput" placeholder="e.g. What happened when I pinched the leaf?" rows="1"></textarea>
           <button type="submit" class="btn-primary small">Send</button>
         </form>
       </section>

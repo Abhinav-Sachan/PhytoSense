@@ -9,7 +9,7 @@
  * Data flow:
  *     Flask API → Waveform → Chart.js
  *               → Metrics → Dashboard
- *               → ML Classification
+ *               → Plant state (trained event detector, /api/state)
  *               → AI Diagnosis / Chat
  */
 
@@ -47,14 +47,26 @@ const el = {
     connectionStatus:
         document.getElementById("connectionStatus"),
 
-    classLabel:
-        document.getElementById("classLabel"),
+    plantState:
+        document.getElementById("plantState"),
 
-    classConfidence:
-        document.getElementById("classConfidence"),
+    stateLabel:
+        document.getElementById("stateLabel"),
 
-    probBars:
-        document.getElementById("probBars"),
+    stateSub:
+        document.getElementById("stateSub"),
+
+    stateMeter:
+        document.getElementById("stateMeter"),
+
+    stateMark:
+        document.getElementById("stateMark"),
+
+    stateMeta:
+        document.getElementById("stateMeta"),
+
+    logNote:
+        document.getElementById("logNote"),
 
     valRms:
         document.getElementById("valRms"),
@@ -79,6 +91,15 @@ const el = {
 
     valElectrodes:
         document.getElementById("valElectrodes"),
+
+    valSoil:
+        document.getElementById("valSoil"),
+
+    valSoilSub:
+        document.getElementById("valSoilSub"),
+
+    valPlantB:
+        document.getElementById("valPlantB"),
 
     logBody:
         document.getElementById("logBody"),
@@ -804,11 +825,8 @@ async function pollWaveform() {
 
 
 /* ============================================================
-   METRICS POLLING
+   FAST CHANNEL NUMBERS (AD8232)
    ============================================================ */
-
-let lastLoggedLabel = null;
-
 
 async function pollMetrics() {
 
@@ -820,204 +838,153 @@ async function pollMetrics() {
     }
 
     if (!data.ready) {
-        /* Don't keep showing an old result when no data is coming in */
-        el.classLabel.textContent = "—";
-        el.classConfidence.textContent =
-            data.source === "offline"
-                ? "Waiting for ESP32…"
-                : "Collecting data…";
-        renderProbBars({});
+        /* Don't keep showing old numbers when no data is coming in */
         el.valRms.textContent = "—";
         el.valPeak.textContent = "—";
         el.valFreq.textContent = "—";
         el.valZcr.textContent = "—";
-        lastLoggedLabel = null;
         return;
     }
 
-
-    /* Classification */
-
-    el.classLabel.textContent =
-        data.label || "Unknown";
-
-
-    el.classConfidence.textContent =
-        `${(
-            (data.confidence || 0) * 100
-        ).toFixed(1)}% confidence`;
-
-
-    /* Probability bars */
-
-    renderProbBars(
-        data.probabilities || {}
-    );
-
-
-    /* ML features */
-
-    const features =
-        data.features || {};
-
+    const features = data.features || {};
 
     el.valRms.textContent =
-        Number(
-            features.rms || 0
-        ).toFixed(3);
-
+        Number(features.rms || 0).toFixed(3);
 
     el.valPeak.textContent =
-        Number(
-            features.max_amplitude || 0
-        ).toFixed(3);
-
+        Number(features.max_amplitude || 0).toFixed(3);
 
     el.valFreq.textContent =
-        `${Number(
-            features.dominant_frequency || 0
-        ).toFixed(1)} Hz`;
-
+        `${Number(features.dominant_frequency || 0).toFixed(1)} Hz`;
 
     el.valZcr.textContent =
-        Number(
-            features.zero_crossing_rate || 0
-        ).toFixed(3);
-
-
-    /* Session log */
-
-    if (
-        data.label &&
-        data.label !== lastLoggedLabel
-    ) {
-
-        appendLogRow(
-            data.label,
-            data.confidence
-        );
-
-        lastLoggedLabel =
-            data.label;
-    }
+        Number(features.zero_crossing_rate || 0).toFixed(3);
 }
 
 
 /* ============================================================
-   PROBABILITY BARS
+   PLANT STATE (trained event detector on the slow ADS1115 channel)
    ============================================================ */
 
-function renderProbBars(probabilities) {
+function formatClock(unixSeconds) {
 
-    el.probBars.innerHTML = "";
-
-
-    Object
-        .entries(probabilities)
-        .sort(
-            (a, b) => b[1] - a[1]
-        )
-        .forEach(
-            ([label, probability]) => {
-
-                const row =
-                    document.createElement("div");
-
-                row.className =
-                    "prob-row";
-
-
-                const percentage =
-                    Math.max(
-                        0,
-                        Math.min(
-                            100,
-                            probability * 100
-                        )
-                    );
-
-
-                row.innerHTML = `
-
-                    <span>
-                        ${label}
-                    </span>
-
-                    <span class="prob-track">
-
-                        <span
-                            class="prob-fill"
-                            style="
-                                width:
-                                ${percentage.toFixed(0)}%
-                            "
-                        ></span>
-
-                    </span>
-
-                    <span>
-                        ${percentage.toFixed(0)}%
-                    </span>
-
-                `;
-
-
-                el.probBars.appendChild(row);
-            }
-        );
+    return new Date(unixSeconds * 1000).toLocaleTimeString(
+        "en-GB",
+        { hour12: false }
+    );
 }
 
 
-/* ============================================================
-   SESSION LOG
-   ============================================================ */
+function formatSeconds(seconds) {
 
-function appendLogRow(
-    label,
-    confidence
-) {
-
-    const row =
-        document.createElement("tr");
-
-
-    const time =
-        new Date().toLocaleTimeString(
-            "en-GB",
-            {
-                hour12: false
-            }
-        );
-
-
-    row.innerHTML = `
-
-        <td>
-            ${time}
-        </td>
-
-        <td>
-            ${label}
-        </td>
-
-        <td>
-            ${(
-                confidence * 100
-            ).toFixed(0)}%
-        </td>
-
-    `;
-
-
-    el.logBody.prepend(row);
-
-
-    while (
-        el.logBody.rows.length > 30
-    ) {
-
-        el.logBody.deleteRow(-1);
+    if (seconds === null || seconds === undefined) {
+        return "—";
     }
+
+    const s = Math.round(seconds);
+
+    return s < 60 ? `${s} s` : `${Math.floor(s / 60)} min ${s % 60} s`;
+}
+
+
+async function pollState() {
+
+    const data =
+        await apiGet("/api/state");
+
+    if (!data) {
+        return;
+    }
+
+    const display = data.display || data.state;
+
+    el.plantState.dataset.state = display;
+    el.stateLabel.textContent = data.label || "—";
+
+
+    /* One line explaining the current state */
+
+    let sub = "";
+
+    if (display === "offline") {
+        sub = "Waiting for ESP32…";
+    } else if (display === "no_signal") {
+        sub = "The ADS1115 is not sending data. Check its wires and restart the ESP32.";
+    } else if (display === "signal_problem") {
+        sub = "The voltage is at the edge of the range — an electrode or the soil wire may be loose.";
+    } else if (display === "no_model") {
+        sub = "models/event_detector.json not found — run train_detector.py.";
+    } else if (display === "warming_up") {
+        sub = `Learning this plant's normal signal… ${data.warmup_left_s} s left`;
+    } else if (display === "event" && data.current_event) {
+        sub = `Something is disturbing the plant · ${formatSeconds(data.current_event.duration_s)} so far · ` +
+              `change ${(data.current_event.peak_mv * 1000).toFixed(0)} µV`;
+    } else if (display === "recovering") {
+        sub = `Signal is settling after the event · back to Calm in ${data.recover_left_s} s`;
+    } else if (display === "calm") {
+        sub = "No disturbance detected. The plant's signal is at its normal level.";
+    }
+
+    el.stateSub.textContent = sub;
+
+
+    /* Probability meter with the alarm threshold marked */
+
+    const live = ["calm", "event", "recovering"].includes(display);
+    const probability = live ? (data.probability || 0) : 0;
+
+    el.stateMeter.style.width = `${(probability * 100).toFixed(0)}%`;
+
+    el.stateMark.style.left =
+        `${((data.threshold || 0.9) * 100).toFixed(0)}%`;
+
+    el.stateMeta.textContent = live
+        ? `Event probability ${(probability * 100).toFixed(0)}% · ` +
+          `normal wobble ±${Math.round(data.noise_uv || 0)} µV · ` +
+          `now ${data.deviation_uv >= 0 ? "+" : ""}${Math.round(data.deviation_uv || 0)} µV from normal`
+        : "";
+
+
+    renderEventLog(data);
+}
+
+
+function renderEventLog(data) {
+
+    const rows = [];
+
+    if (data.current_event) {
+        rows.push({ ...data.current_event, live: true });
+    }
+
+    (data.recent_events || []).forEach((e) => rows.push(e));
+
+    if (rows.length === 0) {
+        el.logBody.innerHTML =
+            '<tr><td colspan="5" class="rec-empty">No events yet.</td></tr>';
+    } else {
+        el.logBody.innerHTML = rows.map((e) => `
+            <tr class="${e.live ? "event-live" : ""}">
+                <td>${formatClock(e.started)}</td>
+                <td>${e.live ? "Happening now" : `Event #${e.id}`}</td>
+                <td>${(e.peak_mv * 1000).toFixed(0)} µV</td>
+                <td>${formatSeconds(e.duration_s)}</td>
+                <td>${Math.round((e.confidence || 0) * 100)}%</td>
+            </tr>
+        `).join("");
+    }
+
+
+    /* How good the detector is (from its honest test) */
+
+    const ev = data.model && data.model.evaluation;
+    const trained = data.model && data.model.trained_on;
+
+    el.logNote.textContent = (ev && trained)
+        ? `Detector trained on ${trained.sessions} recordings (${trained.date}). ` +
+          `In testing it found ${ev.events_detected} of ${ev.events_total} touch/pinch events, ` +
+          `with about ${ev.false_alarms_per_hour} false alarms per hour.`
+        : "";
 }
 
 
@@ -1072,6 +1039,28 @@ async function pollEnvironment() {
             Boolean(t.lead_off)
         );
     }
+}
+
+
+/* ============================================================
+   SOIL MOISTURE (resistive sensor, firmware v2.2)
+   ============================================================ */
+
+async function pollSoil() {
+
+    const data = await apiGet("/api/soil");
+
+    if (!data || !data.available) {
+        el.valSoil.textContent = "—";
+        el.valSoilSub.textContent = "";
+        return;
+    }
+
+    el.valSoil.textContent = `${Math.round(data.moisture_pct)} %`;
+    el.valSoil.classList.toggle("warn", data.moisture_pct < 20);
+
+    const age = data.age_s < 90 ? `${data.age_s} s ago` : `${Math.round(data.age_s / 60)} min ago`;
+    el.valSoilSub.textContent = `${data.mv} mV · ${age}`;
 }
 
 
@@ -1131,6 +1120,19 @@ async function pollDc() {
 
     const data = await apiGet("/api/dc");
     const points = data.points || [];
+
+    /* Plant B (A2-A3): just the newest value */
+    const b = data.plant_b || {};
+    if (b.latest_mv === null || b.latest_mv === undefined) {
+        el.valPlantB.textContent = "—";
+        el.valPlantB.classList.remove("warn");
+    } else if (b.saturated) {
+        el.valPlantB.textContent = "Not connected";
+        el.valPlantB.classList.add("warn");
+    } else {
+        el.valPlantB.textContent = `${b.latest_mv.toFixed(3)} mV`;
+        el.valPlantB.classList.remove("warn");
+    }
 
     dc.chart.data.labels = points.map((p) => p[0]);
     dc.chart.data.datasets[0].data = points.map((p) => p[1]);
@@ -1402,6 +1404,8 @@ async function pollLoop() {
         await Promise.all([
             pollWaveform(),
             pollMetrics(),
+            pollState(),
+            pollSoil(),
             pollEnvironment(),
             pollRecording(),
             pollDc()
@@ -1494,11 +1498,8 @@ el.runDiagnosisBtn.addEventListener(
                 `Based on: ${
                     result.based_on.label
                 } (${
-                    (
-                        result.based_on.confidence *
-                        100
-                    ).toFixed(0)
-                }% confidence) — generated ${
+                    result.based_on.events_total
+                } events detected so far) — generated ${
                     new Date().toLocaleTimeString(
                         "en-GB",
                         {

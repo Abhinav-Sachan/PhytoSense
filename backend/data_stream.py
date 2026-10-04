@@ -33,6 +33,11 @@ class SensorStream:
             self.t += sleep_time
             time.sleep(sleep_time)
 
+    def get_dc2_window(self):
+        """Plant B slow-channel values of the last 5 minutes (microvolts, oldest first)."""
+        with self._lock:
+            return list(self._dc2)
+
     def get_latest_window(self):
         with self._lock:
             return list(self.raw_buffer)
@@ -55,8 +60,9 @@ class IngestBuffer:
         self.expected_rate = expected_rate
         self.dc_max_len = 300 * expected_rate
         self._dc = []           # microvolts (None where the ESP32 had no value), oldest first
+        self._dc2 = []          # plant B (ADS1115 A2-A3), same format
 
-    def push(self, bio_mv_list, telemetry: dict, dc_uv_list=None):
+    def push(self, bio_mv_list, telemetry: dict, dc_uv_list=None, dc2_uv_list=None):
         now = time.time()
         with self._lock:
             self._bio.extend(bio_mv_list)
@@ -66,6 +72,10 @@ class IngestBuffer:
                 self._dc.extend(dc_uv_list)
                 if len(self._dc) > self.dc_max_len:
                     self._dc = self._dc[-self.dc_max_len:]
+            if dc2_uv_list is not None:
+                self._dc2.extend(dc2_uv_list)
+                if len(self._dc2) > self.dc_max_len:
+                    self._dc2 = self._dc2[-self.dc_max_len:]
             self.last_seen = now
             self.latest_telemetry = telemetry
 
@@ -73,6 +83,11 @@ class IngestBuffer:
         """Slow-channel values of the last 5 minutes (microvolts, oldest first)."""
         with self._lock:
             return list(self._dc)
+
+    def get_dc2_window(self):
+        """Plant B slow-channel values of the last 5 minutes (microvolts, oldest first)."""
+        with self._lock:
+            return list(self._dc2)
 
     def get_latest_window(self):
         with self._lock:

@@ -1,46 +1,32 @@
+"""
+Fast-channel signal numbers (AD8232 waveform).
+
+This file used to contain a "classifier" that was trained on RANDOM numbers and
+pretended to tell Healthy / Mild Stress / Water Deficit. That was removed on
+3 Oct 2026. The real, trained plant-state detector now lives in detector.py
+(it uses the slow ADS1115 channel and was trained on real recordings).
+
+What is left here is honest signal description only: RMS, peak, dominant
+frequency and zero-crossing rate of the filtered fast-channel waveform.
+"""
+
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier
 
-class PlantClassifier:
-    def __init__(self, sample_rate=100):
+
+class SignalFeatures:
+    def __init__(self, sample_rate=10):
         self.sample_rate = sample_rate
-        self.model = RandomForestClassifier(n_estimators=50, random_state=42)
-        self._train_synthetic_baseline()
 
-    def _train_synthetic_baseline(self):
-        # Generates a basic synthetic dataset to initialize the RF model
-        X_train = np.random.rand(300, 4) * [5, 10, 3, 0.5] 
-        y_train = np.random.choice(["Healthy", "Mild Stress", "Water Deficit"], 300)
-        self.model.fit(X_train, y_train)
-
-    def extract_features(self, data):
-        data = np.array(data)
-        rms = np.sqrt(np.mean(data**2))
-        max_amp = np.max(np.abs(data))
-        
-        # Zero-crossing rate
+    def extract(self, data):
+        data = np.asarray(data, dtype=float)
+        if data.size == 0:
+            return {"rms": 0.0, "max_amplitude": 0.0, "dominant_frequency": 0.0, "zero_crossing_rate": 0.0}
+        rms = float(np.sqrt(np.mean(data ** 2)))
+        max_amp = float(np.max(np.abs(data)))
         zero_crossings = np.where(np.diff(np.signbit(data)))[0]
-        zcr = len(zero_crossings) / len(data) if len(data) > 0 else 0
-        
-        # Dominant frequency via FFT
-        freqs = np.fft.rfftfreq(len(data), d=1/self.sample_rate)
-        fft_mag = np.abs(np.fft.rfft(data))
-        dom_freq = freqs[np.argmax(fft_mag)] if len(fft_mag) > 0 else 0
-        
-        return {"rms": float(rms), "max_amplitude": float(max_amp), 
-                "dominant_frequency": float(dom_freq), "zero_crossing_rate": float(zcr)}
-
-    def classify(self, features):
-        feature_vector = [[features["rms"], features["max_amplitude"], 
-                           features["dominant_frequency"], features["zero_crossing_rate"]]]
-        probs = self.model.predict_proba(feature_vector)[0]
-        classes = self.model.classes_
-        
-        prob_dict = {classes[i]: float(probs[i]) for i in range(len(classes))}
-        best_idx = np.argmax(probs)
-        
-        return {
-            "label": classes[best_idx],
-            "confidence": float(probs[best_idx]),
-            "probabilities": prob_dict
-        }
+        zcr = len(zero_crossings) / len(data)
+        freqs = np.fft.rfftfreq(len(data), d=1 / self.sample_rate)
+        fft_mag = np.abs(np.fft.rfft(data - data.mean()))
+        dom_freq = float(freqs[np.argmax(fft_mag)]) if len(fft_mag) > 1 else 0.0
+        return {"rms": rms, "max_amplitude": max_amp,
+                "dominant_frequency": dom_freq, "zero_crossing_rate": float(zcr)}
