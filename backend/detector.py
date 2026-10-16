@@ -181,7 +181,7 @@ class LiveDetector:
         self.last_seq = None
 
     # ---- input ----------------------------------------------------------
-    MAX_GAP_S = 10        # longer silence / missing data -> start the history again
+    MAX_GAP_S = 300        # longer silence / missing data -> start the history again
 
     def push(self, dc_uv_list, seq_list=None, now=None):
         """dc_uv_list: new samples (microvolts), oldest first. None values are skipped.

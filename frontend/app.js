@@ -101,6 +101,9 @@ const el = {
     valPlantB:
         document.getElementById("valPlantB"),
 
+    valPlantBSub:
+        document.getElementById("valPlantBSub"),
+
     logBody:
         document.getElementById("logBody"),
 
@@ -837,8 +840,8 @@ async function pollMetrics() {
         return;
     }
 
-    if (!data.ready) {
-        /* Don't keep showing old numbers when no data is coming in */
+    if (!data.ready || state.leadOff) {
+        /* Don't show numbers when no data is coming in or the AD8232 pads are not attached */
         el.valRms.textContent = "—";
         el.valPeak.textContent = "—";
         el.valFreq.textContent = "—";
@@ -910,6 +913,9 @@ async function pollState() {
         sub = "Waiting for ESP32…";
     } else if (display === "no_signal") {
         sub = "The ADS1115 is not sending data. Check its wires and restart the ESP32.";
+    } else if (display === "signal_problem" && data.problem === "noisy") {
+        sub = `The signal is wobbling by ±${Math.round(data.noise_uv || 0)} µV (a plant on good electrodes wobbles by a few µV). ` +
+              "A pad may have lost contact (re-gel it) or the soil wire is out of the soil.";
     } else if (display === "signal_problem") {
         sub = "The voltage is at the edge of the range — an electrode or the soil wire may be loose.";
     } else if (display === "no_model") {
@@ -1024,6 +1030,7 @@ async function pollEnvironment() {
         formatReading(t.light_pct, 0, " %");
 
     /* lead_off = true means the AD8232 sees no electrode contact */
+    state.leadOff = Boolean(data && data.online && t.lead_off);
     if (!data || !data.online) {
 
         el.valElectrodes.textContent = "—";
@@ -1128,13 +1135,60 @@ function renderMonitor(data) {
    SOIL MOISTURE (resistive sensor, firmware v2.2)
    ============================================================ */
 
+/* ============================================================
+   WATER STATUS (H1, rule-based from the soil sensor)
+   ============================================================ */
+
+const water = {
+    box: document.getElementById("waterState"),
+    label: document.getElementById("waterLabel"),
+    sub: document.getElementById("waterSub"),
+    meta: document.getElementById("waterMeta")
+};
+
+async function pollWater() {
+    const d = await apiGet("/api/water");
+    if (!d || !d.available) {
+        water.box.dataset.state = "offline";
+        water.label.textContent = "—";
+        water.sub.textContent = !d ? "Backend offline" :
+            d.reason === "offline" ? "ESP32 offline" : "Waiting for a soil reading…";
+        water.meta.textContent = "";
+        return;
+    }
+    water.box.dataset.state = d.state;
+    water.label.textContent = d.label;
+
+    let sub = `Soil moisture ${Math.round(d.moisture_pct)} % · ${d.advice}`;
+    if (d.hours_to_thirsty !== null && d.hours_to_thirsty !== undefined) {
+        sub += ` Thirsty in about ${d.hours_to_thirsty < 1 ? "1" : Math.round(d.hours_to_thirsty)} h at this speed.`;
+    }
+    water.sub.textContent = sub;
+
+    const parts = [];
+    if (d.rate_pct_per_h !== null && d.rate_pct_per_h !== undefined) {
+        parts.push(`trend ${d.rate_pct_per_h >= 0 ? "+" : ""}${d.rate_pct_per_h.toFixed(1)} %/h (last ${d.trend_hours} h)`);
+    } else {
+        parts.push("trend: needs 30 min of readings");
+    }
+    if (d.last_watered_clock) parts.push(`last watered ${d.last_watered_clock}`);
+    water.meta.textContent = parts.join(" · ");
+}
+
+
 async function pollSoil() {
 
     const data = await apiGet("/api/soil");
 
+    /* Offline or old reading: show a dash, never an old number as if it were live */
     if (!data || !data.available) {
         el.valSoil.textContent = "—";
-        el.valSoilSub.textContent = "";
+        el.valSoil.classList.remove("warn");
+        el.valSoilSub.textContent =
+            !data ? "" :
+            data.reason === "offline" ? "ESP32 offline" :
+            data.reason === "stale" ? "waiting for a new reading" :
+            "no reading yet";
         return;
     }
 
@@ -1203,17 +1257,25 @@ async function pollDc() {
     const data = await apiGet("/api/dc");
     const points = data.points || [];
 
-    /* Plant B (A2-A3): just the newest value */
+    /* Plant B (A2-A3): newest value + how much it wobbles (pad contact check).
+       Nothing on A2-A3 reads as a flat 0.000 mV, so a flat zero means "not connected". */
     const b = data.plant_b || {};
-    if (b.latest_mv === null || b.latest_mv === undefined) {
+    const bVals = (b.points || []).slice(-10).map((p) => p[1]).filter((v) => v !== null && v !== undefined);
+    const bFlatZero = bVals.length >= 3 && bVals.every((v) => Math.abs(v) < 0.005);
+    const bWobble = (b.wobble_uv === null || b.wobble_uv === undefined) ? null : b.wobble_uv;
+    el.valPlantB.classList.remove("warn");
+    el.valPlantBSub.textContent = "";
+    if (!data.online || b.latest_mv === null || b.latest_mv === undefined) {
         el.valPlantB.textContent = "—";
-        el.valPlantB.classList.remove("warn");
-    } else if (b.saturated) {
+    } else if (b.saturated || bFlatZero) {
         el.valPlantB.textContent = "Not connected";
+    } else if (bWobble !== null && bWobble > 100) {
+        el.valPlantB.textContent = "Noisy signal";
         el.valPlantB.classList.add("warn");
+        el.valPlantBSub.textContent = `wobble ±${Math.round(bWobble)} µV · re-press H2 pads, push soil wire deeper`;
     } else {
         el.valPlantB.textContent = `${b.latest_mv.toFixed(3)} mV`;
-        el.valPlantB.classList.remove("warn");
+        if (bWobble !== null) el.valPlantBSub.textContent = `wobble ±${bWobble.toFixed(1)} µV · OK`;
     }
 
     dc.chart.data.labels = points.map((p) => p[0]);
@@ -1488,6 +1550,7 @@ async function pollLoop() {
             pollMetrics(),
             pollState(),
             pollSoil(),
+            pollWater(),
             pollMonitor(),
             pollEnvironment(),
             pollRecording(),
@@ -2312,104 +2375,143 @@ installAIResponseStyles();
    CHAT FORM
    ============================================================ */
 
+/* Photo attached with the "+" button (data URL, already shrunk) */
+const chatPhoto = {
+    plus: document.getElementById("chatPlus"),
+    file: document.getElementById("chatFile"),
+    box: document.getElementById("chatAttach"),
+    img: document.getElementById("chatAttachImg"),
+    remove: document.getElementById("chatAttachRemove"),
+    data: null
+};
+
+/* Centre square of the photo shrunk to 96 x 96, as raw RGB bytes in base64 -
+   the input of the PlantVillage disease CNN on the server */
+function squarePixels(dataUrl, size = 96) {
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onerror = () => reject(new Error("Could not read the photo"));
+        img.onload = () => {
+            const side = Math.min(img.width, img.height);
+            const canvas = document.createElement("canvas");
+            canvas.width = size; canvas.height = size;
+            const g = canvas.getContext("2d");
+            g.imageSmoothingQuality = "high";
+            g.drawImage(img, (img.width - side) / 2, (img.height - side) / 2, side, side, 0, 0, size, size);
+            const rgba = g.getImageData(0, 0, size, size).data;
+            let bin = "";
+            for (let i = 0; i < rgba.length; i += 4) {
+                bin += String.fromCharCode(rgba[i], rgba[i + 1], rgba[i + 2]);
+            }
+            resolve(btoa(bin));
+        };
+        img.src = dataUrl;
+    });
+}
+
+function clearChatPhoto() {
+    chatPhoto.pixels = null;
+    chatPhoto.data = null;
+    chatPhoto.file.value = "";
+    chatPhoto.box.hidden = true;
+}
+
+chatPhoto.plus.addEventListener("click", () => chatPhoto.file.click());
+chatPhoto.remove.addEventListener("click", clearChatPhoto);
+chatPhoto.file.addEventListener("change", async () => {
+    const f = chatPhoto.file.files && chatPhoto.file.files[0];
+    if (!f) return;
+    try {
+        chatPhoto.data = await shrinkImage(f);
+        const originalUrl = URL.createObjectURL(f);          /* original photo: sharper input for the CNN */
+        try { chatPhoto.pixels = await squarePixels(originalUrl); } finally { URL.revokeObjectURL(originalUrl); }
+        chatPhoto.img.src = chatPhoto.data;
+        chatPhoto.box.hidden = false;
+        el.chatInput.focus();
+    } catch (e) {
+        appendChatMessage("assistant", `Couldn't use that file: ${e.message}`);
+        clearChatPhoto();
+    }
+});
+
+/* What our own PlantVillage disease CNN said */
+function cnnLineHTML(r) {
+    if (!r.cnn || !r.cnn.length) return "";
+    const best = r.cnn[0];
+    const acc = r.cnn_accuracy ? ` · ${Math.round(r.cnn_accuracy * 100)}% test accuracy` : "";
+    if (r.cnn_used === false) {
+        return `<div class="leaf-meta" style="margin-top:6px">Disease model (PlantVillage CNN): this plant is not one of its 14 crops, so it was not used.</div>`;
+    }
+    return `<div class="cnn-line"><strong>Disease model (PlantVillage CNN${acc}):</strong>
+        ${escapeHTML(best.crop)} – ${escapeHTML(best.condition)} (${Math.round(best.probability * 100)}%)</div>`;
+}
+
+/* Small result card under the assistant's answer to a photo */
+function leafCardHTML(r) {
+    const items = (arr) => (arr && arr.length) ? `<ul>${arr.map((x) => `<li>${escapeHTML(x)}</li>`).join("")}</ul>` : "";
+    const causes = (r.possible_causes || []).map((c) => `${c.cause || "?"}${c.likelihood ? ` (${c.likelihood})` : ""}`);
+    return `
+        <div class="chat-leaf-card">
+            <span class="leaf-verdict" data-level="${verdictLevel(r.verdict)}">${escapeHTML(r.verdict || "Unclear")}</span>
+            <div class="leaf-meta">${escapeHTML(r.plant_guess || "plant not recognised")} · confidence ${escapeHTML(r.confidence || "?")}</div>
+            ${r.symptoms && r.symptoms.length ? `<strong>Visible signs</strong>${items(r.symptoms)}` : ""}
+            ${causes.length ? `<strong>Possible causes</strong>${items(causes)}` : ""}
+            ${r.sensor_link ? `<div class="leaf-link">${escapeHTML(r.sensor_link)}</div>` : ""}
+            ${cnnLineHTML(r)}
+            <div class="leaf-meta" style="margin-top:6px">AI visual check, not a lab diagnosis</div>
+        </div>`;
+}
+
 el.chatForm.addEventListener(
     "submit",
     async (event) => {
 
         event.preventDefault();
 
+        const message = el.chatInput.value.trim();
+        const image = chatPhoto.data;
+        const pixels = chatPhoto.pixels;
 
-        const message =
-            el.chatInput.value.trim();
-
-
-        if (!message) {
+        if (!message && !image) {
             return;
         }
 
-
-        /* User message */
-
-        appendChatMessage(
-            "user",
-            message
-        );
-
+        /* User message (with the photo, if any) */
+        const userBubble = appendChatMessage("user", message || "What plant is this, and is it healthy?");
+        if (image) {
+            const photo = document.createElement("img");
+            photo.className = "chat-photo";
+            photo.src = image;
+            photo.alt = "Plant photo";
+            userBubble.prepend(photo);
+        }
 
         /* History BEFORE this message: the backend adds the new message itself */
-        const previousHistory =
-            state.chatHistory.slice();
-
-
-        state.chatHistory.push({
-            role: "user",
-            content: message
-        });
-
+        const previousHistory = state.chatHistory.slice();
+        const historyText = (message || "What plant is this, and is it healthy?") + (image ? " [plant photo attached]" : "");
+        state.chatHistory.push({ role: "user", content: historyText });
 
         el.chatInput.value = "";
+        clearChatPhoto();
 
-
-        /* Thinking message */
-
-        const thinkingBubble =
-            appendChatMessage(
-                "assistant",
-                "Thinking…"
-            );
-
+        const thinkingBubble = appendChatMessage("assistant", image ? "Looking at the photo…" : "Thinking…");
 
         try {
+            const payload = { message, history: previousHistory };
+            if (image) { payload.image = image; payload.pixels = pixels; }
 
-            const result =
-                await apiPost(
-                    "/api/ai/chat",
-                    {
-                        message,
+            const result = await apiPost("/api/ai/chat", payload);
 
-                        history:
-                            previousHistory
-                    }
-                );
+            thinkingBubble.innerHTML = formatAIResponse(result.reply) + (result.leaf ? leafCardHTML(result.leaf) : "");
 
+            state.chatHistory.push({ role: "assistant", content: result.reply });
 
-            /*
-             * Replace "Thinking…" with
-             * the formatted AI response.
-             */
-
-            thinkingBubble.innerHTML =
-                formatAIResponse(
-                    result.reply
-                );
-
-
-            state.chatHistory.push({
-                role: "assistant",
-                content: result.reply
-            });
-
-
-            el.chatMessages.scrollTop =
-                el.chatMessages.scrollHeight;
-
+            el.chatMessages.scrollTop = el.chatMessages.scrollHeight;
 
         } catch (error) {
-
-            console.error(
-                "AI chat error:",
-                error
-            );
-
-
-            thinkingBubble.textContent =
-                `Couldn't get a response: ${
-                    error.message
-                }`;
-
-
-            /* Remove the unanswered message so history stays clean */
-            state.chatHistory.pop();
+            console.error("AI chat error:", error);
+            thinkingBubble.textContent = `Couldn't get a response: ${error.message}`;
+            state.chatHistory.pop();   /* keep history clean */
         }
     }
 );
@@ -2458,3 +2560,51 @@ console.log(
 
 
 startPolling();
+
+/* ============================================================
+   CHAT SUGGESTION CHIPS
+   ============================================================ */
+
+document.querySelectorAll("#chatChips .chip").forEach((chip) => {
+    chip.addEventListener("click", () => {
+        el.chatInput.value = chip.dataset.q;
+        el.chatForm.requestSubmit();
+    });
+});
+
+
+/* ============================================================
+   LEAF HEALTH CHECK (photo -> AI vision model)
+   ============================================================ */
+
+/* Shrink the photo in the browser (max 1024 px, JPEG) so upload is fast and small */
+function shrinkImage(file, maxSide = 1024) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onerror = () => reject(new Error("Could not read the photo"));
+        reader.onload = () => {
+            const img = new Image();
+            img.onerror = () => reject(new Error("This file is not a photo"));
+            img.onload = () => {
+                const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+                const canvas = document.createElement("canvas");
+                canvas.width = Math.round(img.width * scale);
+                canvas.height = Math.round(img.height * scale);
+                canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+                resolve(canvas.toDataURL("image/jpeg", 0.85));
+            };
+            img.src = reader.result;
+        };
+        reader.readAsDataURL(file);
+    });
+}
+
+function verdictLevel(v) {
+    const t = String(v || "").toLowerCase();
+    if (t.includes("healthy")) return "healthy";
+    if (t.includes("mild")) return "mild";
+    if (t.includes("moderate")) return "moderate";
+    if (t.includes("severe")) return "severe";
+    return "unknown";
+}
+

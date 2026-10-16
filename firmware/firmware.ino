@@ -1,6 +1,9 @@
 /*
-  PhytoSense ESP32 firmware  (v2.3: status LEDs + soil moisture sensor + second plant on A2-A3)
+  PhytoSense ESP32 firmware  (v2.4: steadier soil reading; status LEDs; soil sensor; plant B on A2-A3)
   Pin map matches the ACTUAL wiring on the breadboard (checked 04-10-2026).
+
+  NEW in v2.4 - soil sensor is read in one block of back-to-back reads after it has been
+  ON for 100 ms (was mixed with AD8232 reads, which made the dry value low and wandering).
 
   NEW in v2.3 - two status LEDs for the enclosure (no resistors needed: the pins are
   set to their weakest drive strength, which limits the LED current):
@@ -89,7 +92,7 @@ const int ADS_EVERY_N_READS = 5;     // every 5 ms: collect one ADS1115 result, 
 const uint32_t SOIL_FAST_SAMPLES = 50;      // every 5 s ...
 const uint32_t SOIL_FAST_UNTIL   = 3000;    // ... during the first 5 minutes (calibration)
 const uint32_t SOIL_SLOW_SAMPLES = 600;     // then every 60 s
-const int SOIL_SETTLE_READS = 50;           // sensor ON at 0 ms, read from 50 ms to 100 ms
+const int SOIL_READS = 32;                  // sensor ON for 100 ms, then 32 back-to-back reads (< 1 ms)
 const unsigned long DHT_READ_MS = 2000;     // DHT11 needs at least 1 s between reads
 const unsigned long WIFI_TIMEOUT_MS = 20000;
 
@@ -174,11 +177,6 @@ void samplerTask(void *parameter) {
       vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(1));   // wait for the next 1 ms slot
       bioSum += analogReadMilliVolts(PIN_AD8232_OUT);
 
-      if (soilNow && i >= SOIL_SETTLE_READS) {
-        soilSum += analogReadMilliVolts(PIN_SOIL_AO);
-        soilCount++;
-      }
-
       if (adsFound && (i % ADS_EVERY_N_READS == 0)) {
         if (adsStarted) {                               // result of the conversion started 5 ms ago
           float uv = ads.computeVolts(ads.getLastConversionResults()) * 1e6f;   // volts -> microvolts
@@ -190,7 +188,20 @@ void samplerTask(void *parameter) {
         adsStarted = true;
       }
     }
-    if (soilNow) digitalWrite(PIN_SOIL_VCC, LOW);       // switch the sensor OFF again
+    if (soilNow) {
+      // v2.4: read the soil sensor in ONE block of back-to-back reads, after the sensor has
+      // been ON for 100 ms. Before, soil reads were mixed with AD8232 reads (other pin),
+      // and the ESP32's converter kept a little of the AD8232 voltage each time; with the
+      // soil board's high resistance this pulled the soil value down and made it wander.
+      analogReadMilliVolts(PIN_SOIL_AO);                 // throw away: lets the converter
+      analogReadMilliVolts(PIN_SOIL_AO);                 // settle on the soil pin
+      for (int k = 0; k < SOIL_READS; k++) {
+        soilSum += analogReadMilliVolts(PIN_SOIL_AO);
+        soilCount++;
+        delayMicroseconds(20);
+      }
+      digitalWrite(PIN_SOIL_VCC, LOW);                   // switch the sensor OFF again
+    }
 
     // Once per sample: electrode check + light level
     leadOff = digitalRead(PIN_AD8232_LOM) == HIGH || digitalRead(PIN_AD8232_LOP) == HIGH;
@@ -346,7 +357,7 @@ String buildJson() {
   body += ",\"ads1115\":" + String(adsFound ? "true" : "false");
   body += ",\"rssi\":" + String((int)WiFi.RSSI());
   body += ",\"uptime_s\":" + String(millis() / 1000.0, 1);
-  body += ",\"fw\":\"2.3\"";
+  body += ",\"fw\":\"2.4\"";
   body += "}";
   return body;
 }
@@ -391,7 +402,7 @@ void printResult(int code, int sent) {
 void setup() {
   Serial.begin(115200);
   delay(500);
-  Serial.println("\n=== PhytoSense v2.3 starting ===");
+  Serial.println("\n=== PhytoSense v2.4 starting ===");
   setupLeds();
 
   pinMode(PIN_AD8232_LOM, INPUT);
@@ -440,7 +451,7 @@ void loop() {
   lastPostCode = code;
   printResult(code, sent);
 
-  if (code == 200 || code == 400 || code == 401) {
+  if (code == 200 || code == 400 || code == 400 + 1) {
     pendingCount = 0;   // delivered (or the server will never accept it) -> clear
   }
   // Any other failure: keep the pending samples and try again next loop.

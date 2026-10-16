@@ -7,7 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css?v=11c" />
+<link rel="stylesheet" href="style.css?v=16" />
 </head>
 <body>
 
@@ -138,6 +138,13 @@
           <div class="plant-state-meta" id="stateMeta"></div>
         </div>
 
+        <h3 class="readout-section-title">Water status (H1, soil sensor)</h3>
+        <div class="plant-state water-state" id="waterState" data-state="offline">
+          <div class="plant-state-label" id="waterLabel">&mdash;</div>
+          <div class="plant-state-sub" id="waterSub">Waiting for the soil sensor&hellip;</div>
+          <div class="plant-state-meta" id="waterMeta"></div>
+        </div>
+
         <h3 class="readout-section-title">Fast channel (AD8232)</h3>
         <div class="readout-grid">
           <div class="readout">
@@ -173,7 +180,7 @@
             <span class="readout-value" id="valLight">—</span>
           </div>
           <div class="readout">
-            <span class="readout-label">Electrodes</span>
+            <span class="readout-label">AD8232 pads</span>
             <span class="readout-value" id="valElectrodes">—</span>
           </div>
           <div class="readout">
@@ -184,6 +191,7 @@
           <div class="readout">
             <span class="readout-label">Plant B (A2&minus;A3)</span>
             <span class="readout-value" id="valPlantB">—</span>
+            <span class="readout-sub" id="valPlantBSub"></span>
           </div>
         </div>
       </section>
@@ -299,22 +307,37 @@
         <div class="panel-header"><h2>Ask about your plant</h2></div>
         <div class="chat-messages" id="chatMessages">
           <div class="chat-msg assistant">
-            <div class="chat-bubble">Hi — I can see the current sensor
-            reading. Ask me anything about what's happening with the plant,
-            or what to do about it.</div>
+            <div class="chat-bubble">Hi, I'm the PhytoSense assistant. I can see the live
+            readings of both plants, the soil and the room. Ask me anything, or press
+            <b>+</b> to send a plant photo and I'll identify it and check its health.</div>
           </div>
         </div>
+        <div class="chat-chips" id="chatChips">
+          <button type="button" class="chip" data-q="Does my plant need water?">Does my plant need water?</button>
+          <button type="button" class="chip" data-q="Summarise what happened in the last hour.">Last hour summary</button>
+          <button type="button" class="chip" data-q="Is the electrode signal good right now? Compare H1 and H2.">Signal quality</button>
+          <button type="button" class="chip" data-q="What did the photo check find and what should I do?">Photo check result</button>
+          <button type="button" class="chip" data-q="Explain how PhytoSense works in simple words.">How does it work?</button>
+        </div>
+        <div class="chat-attach" id="chatAttach" hidden>
+          <img id="chatAttachImg" alt="Attached plant photo">
+          <span>Plant photo attached</span>
+          <button type="button" class="chat-attach-remove" id="chatAttachRemove" title="Remove photo">&times;</button>
+        </div>
         <form class="chat-input-row" id="chatForm">
-          <textarea id="chatInput" placeholder="e.g. What happened when I pinched the leaf?" rows="1"></textarea>
+          <button type="button" class="chat-plus" id="chatPlus" title="Add a plant photo">+</button>
+          <input type="file" accept="image/*" id="chatFile" hidden>
+          <textarea id="chatInput" placeholder="Ask about your plant, or press + to add a photo" rows="1"></textarea>
           <button type="submit" class="btn-primary small">Send</button>
         </form>
       </section>
+
 
     </div>
   </section>
 
   <script src="chart.umd.min.js"></script>
-  <script src="app.js?v=11c"></script>
+  <script src="app.js?v=16"></script>
 
 </body>
 </html>
